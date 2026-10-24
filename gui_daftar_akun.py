@@ -114,7 +114,7 @@ class TextDialog(tk.Toplevel):
 def make_button(parent, text, command, bg, hover, fg=TEXT, font=FONT_B, padx=18, pady=8):
     b = tk.Button(parent, text=text, command=command, bg=bg, fg=fg, activebackground=hover,
                   activeforeground=fg, relief="flat", bd=0, cursor="hand2", font=font,
-                  padx=padx, pady=pady, disabledforeground="#5b6485")
+                  padx=padx, pady=pady, disabledforeground="#5b6485", highlightthickness=0)
     b._bg, b._hover = bg, hover
 
     def enter(_):
@@ -191,7 +191,11 @@ class App:
         s.configure("TRadiobutton", background=CARD, foreground=TEXT, font=FONT)
         s.map("TRadiobutton", background=[("active", CARD)])
         s.configure("Vertical.TScrollbar", background=CARD2, troughcolor=CARD, bordercolor=CARD,
-                    arrowcolor=MUTED)
+                    arrowcolor=MUTED, lightcolor=CARD2, darkcolor=CARD2, relief="flat")
+        s.map("Vertical.TScrollbar", background=[("active", BORDER)])
+        s.configure("TNotebook", lightcolor=BG, darkcolor=BG, bordercolor=BG)
+        s.configure("TNotebook.Tab", lightcolor=CARD, darkcolor=CARD, bordercolor=CARD)
+        s.configure("Treeview", bordercolor=CARD, lightcolor=CARD, darkcolor=CARD)
 
     def card(self, parent, **kw):
         return tk.Frame(parent, bg=CARD, highlightthickness=1, highlightbackground=BORDER, **kw)
