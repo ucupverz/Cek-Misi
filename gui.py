@@ -88,7 +88,7 @@ FEATURES = {
     "claim": {
         "nav": "Klaim Voucher",
         "title": "Klaim Voucher ShopeeFood",
-        "desc": "Klaim voucher ShopeeFood otomatis lewat @shp_tools_bot untuk setiap akun (email / username / ID).",
+        "desc": "Klaim voucher ShopeeFood (NEWFOODIES + ONGKIRGRATIS) otomatis lewat @shp_tools_bot, keduanya untuk setiap akun.",
         "delay": 4.0,
         "hint": "Satu akun per baris: email, username, atau ID.",
     },
@@ -340,12 +340,20 @@ class TaskPage(ctk.CTkFrame):
         opt.grid_columnconfigure(1, weight=1)
         r = 0
         if self.mode == "claim":
-            label(opt, "Tautan voucher", 12, color=C_MUTED).grid(row=r, column=0, sticky="w", padx=(16, 10), pady=(14, 6))
-            self.link_entry = ctk.CTkEntry(opt, height=34, fg_color=C_CARD_ALT, border_color=C_BORDER)
-            self.link_entry.grid(row=r, column=1, sticky="ew", padx=(0, 16), pady=(14, 6))
-            link = voucher_claim.load_voucher_claim_config()
-            if link:
-                self.link_entry.insert(0, link)
+            label(opt, "Voucher", 12, color=C_MUTED).grid(row=r, column=0, sticky="w", padx=(16, 10), pady=(14, 6))
+            vrow = ctk.CTkFrame(opt, fg_color="transparent")
+            vrow.grid(row=r, column=1, sticky="w", pady=(14, 6))
+            self.voucher_vars = {}
+            for name in voucher_claim.DEFAULT_VOUCHERS:
+                var = tk.BooleanVar(value=True)
+                self.voucher_vars[name] = var
+                ctk.CTkCheckBox(vrow, text=name, variable=var, fg_color=C_ACCENT,
+                                hover_color=C_ACCENT_HOVER, text_color=C_TEXT).pack(side="left", padx=(0, 16))
+            r += 1
+            label(opt, "Tautan tambahan", 12, color=C_MUTED).grid(row=r, column=0, sticky="w", padx=(16, 10), pady=6)
+            self.link_entry = ctk.CTkEntry(opt, height=34, fg_color=C_CARD_ALT, border_color=C_BORDER,
+                                           placeholder_text="opsional: tautan voucher lain")
+            self.link_entry.grid(row=r, column=1, sticky="ew", padx=(0, 16), pady=6)
             r += 1
         else:
             label(opt, "Metode akun", 12, color=C_MUTED).grid(row=r, column=0, sticky="w", padx=(16, 10), pady=(14, 6))
@@ -567,13 +575,15 @@ class TaskPage(ctk.CTkFrame):
             messagebox.showwarning(APP_NAME, "Daftar akun masih kosong.")
             return
 
-        link = None
+        links = None
         if self.mode == "claim":
-            link = self.link_entry.get().strip()
-            if not link:
-                messagebox.showwarning(APP_NAME, "Tautan voucher belum diisi.")
+            links = [voucher_claim.DEFAULT_VOUCHERS[n] for n, v in self.voucher_vars.items() if v.get()]
+            extra = self.link_entry.get().strip()
+            if extra:
+                links.append(extra)
+            if not links:
+                messagebox.showwarning(APP_NAME, "Pilih minimal satu voucher.")
                 return
-            voucher_claim.save_voucher_claim_config(link)
         else:
             if self.resume_var.get() and len(accounts) > 0:
                 to_process, skipped = shopee_core.filter_unprocessed_usernames(accounts, self.mode)
@@ -605,7 +615,7 @@ class TaskPage(ctk.CTkFrame):
                     await cek_misi_termux.run_both_mode(client, accounts, auth_method=method, step_delay=delay)
                 else:
                     await voucher_claim.run_voucher_claim_mode(
-                        client=client, accounts=accounts, voucher_link=link, step_delay=delay)
+                        client=client, accounts=accounts, voucher_links=links, step_delay=delay)
             finally:
                 try:
                     await client.disconnect()
