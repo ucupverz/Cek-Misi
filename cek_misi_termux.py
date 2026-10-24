@@ -25,6 +25,7 @@ from telethon.errors import FloodWaitError
 
 import shopee_core
 import voucher_claim
+import daftar_akun_fresh
 
 # Inisialisasi pewarnaan terminal (fallback aman jika colorama/rich tidak terpasang)
 try:
@@ -61,6 +62,7 @@ def print_banner():
  {WHITE}5.{RESET} 👥 {BOLD}Kelola Multi-Worker{RESET}     (Multi-Login Akun Telegram)
  {WHITE}6.{RESET} ⚙️  {BOLD}Reset Pengaturan{RESET}        (Hapus Sesi & API Telegram)
  {WHITE}7.{RESET} 🎟️ {BOLD}Klaim Voucher ShopeeFood{RESET} (Auto-Claim Voucher ke Bot)
+ {WHITE}8.{RESET} 📝 {BOLD}Daftar Akun Fresh{RESET}        (Registrasi akun baru via @shp_tools_bot)
  {WHITE}0.{RESET} 🚪 {BOLD}Keluar{RESET}
 {CYAN}======================================================================{RESET}
 """
@@ -563,7 +565,7 @@ async def main():
     if not selected_mode:
         while True:
             print_banner()
-            choice = input(f"{WHITE}Pilih menu [1/2/3/4/5/6/7/0]: {RESET}").strip()
+            choice = input(f"{WHITE}Pilih menu [0-8]: {RESET}").strip()
             if choice == "1":
                 selected_mode = "misi"
                 break
@@ -601,11 +603,15 @@ async def main():
             elif choice in ("7", "claim", "klaim"):
                 await voucher_claim.interactive_voucher_claim_menu()
                 return
+            elif choice in ("8", "daftar", "register"):
+                await daftar_akun_fresh.interactive_register_menu()
+                input(f"\n{WHITE}Tekan Enter untuk kembali ke menu...{RESET}")
+                continue
             elif choice in ("0", "q", "exit"):
                 print("Sampai jumpa!")
                 return
             else:
-                print("❌ Pilihan tidak valid, silakan ketik angka 1 sampai 7, atau 0.")
+                print("❌ Pilihan tidak valid, silakan ketik angka 1 sampai 8, atau 0.")
 
     # Jika mode claim, metode login spesifik bot check-in (cookie/username) tidak diperlukan
     if selected_mode == "claim":
@@ -711,3 +717,10 @@ if __name__ == "__main__":
         print("\n\nDihentikan oleh pengguna.")
     except Exception as exc:
         print(f"\n❌ Terjadi kesalahan: {exc}")
+    finally:
+        # Saat dijalankan sebagai .exe (double-click), jangan langsung menutup jendela
+        if getattr(sys, "frozen", False):
+            try:
+                input("\nTekan Enter untuk menutup jendela...")
+            except (EOFError, KeyboardInterrupt):
+                pass
