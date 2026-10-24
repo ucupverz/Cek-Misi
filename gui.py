@@ -680,13 +680,32 @@ class RegisterPage(ctk.CTkFrame):
         left = card(body)
         left.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
 
-        label(left, "1. Jumlah akun", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
-        label(left, "Berapa akun fresh yang ingin didapat.", 11, color=C_MUTED).pack(anchor="w", padx=18)
+        # tombol di bawah (dipack lebih dulu agar tidak pernah terpotong)
+        self.stop_btn = ctk.CTkButton(left, text="Berhenti", height=42, state="disabled", corner_radius=10,
+                                      fg_color=C_CARD_ALT, hover_color=C_BORDER,
+                                      font=ctk.CTkFont(size=13, weight="bold"), command=self.app.stop_job)
+        self.stop_btn.pack(side="bottom", fill="x", padx=18, pady=(0, 16))
+        self.start_btn = primary_button(left, "Mulai Daftar", self.start, width=200, height=42)
+        self.start_btn.pack(side="bottom", fill="x", padx=18, pady=(0, 8))
+
+        label(left, "1. Jumlah akun", 14, "bold").pack(anchor="w", padx=18, pady=(12, 0))
+        label(left, "Berapa akun yang ingin didapat.", 11, color=C_MUTED).pack(anchor="w", padx=18)
         self.target_entry = ctk.CTkEntry(left, height=38, width=120, fg_color=C_CARD_ALT, border_color=C_BORDER)
         self.target_entry.insert(0, "10")
         self.target_entry.pack(anchor="w", padx=18, pady=(8, 0))
 
-        label(left, "2. Fingerprint", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
+        label(left, "2. Mode", 14, "bold").pack(anchor="w", padx=18, pady=(10, 0))
+        self.mode_hint = label(left, "", 11, color=C_MUTED, wraplength=300, justify="left")
+        self.mode_hint.pack(anchor="w", padx=18)
+        self.mode_seg = ctk.CTkSegmentedButton(
+            left, values=["Fresh", "Tabrak"], selected_color=C_ACCENT,
+            selected_hover_color=C_ACCENT_HOVER, unselected_color=C_CARD_ALT,
+            unselected_hover_color=C_BORDER, fg_color=C_CARD_ALT, command=lambda _v: self._mode_hint())
+        self.mode_seg.set("Fresh")
+        self.mode_seg.pack(anchor="w", padx=18, pady=(8, 0))
+        self._mode_hint()
+
+        label(left, "3. Fingerprint", 14, "bold").pack(anchor="w", padx=18, pady=(10, 0))
         self.fp_hint = label(left, "", 11, color=C_MUTED, wraplength=300, justify="left")
         self.fp_hint.pack(anchor="w", padx=18)
         self.fp_seg = ctk.CTkSegmentedButton(
@@ -697,9 +716,9 @@ class RegisterPage(ctk.CTkFrame):
         self.fp_seg.pack(anchor="w", padx=18, pady=(8, 0))
         self._fp_hint()
         label(left, "OTP diurus otomatis oleh bot, Anda tidak perlu mengisi apa pun.", 11,
-              color=C_MUTED, wraplength=300, justify="left").pack(anchor="w", padx=18, pady=(14, 0))
+              color=C_MUTED, wraplength=300, justify="left").pack(anchor="w", padx=18, pady=(10, 0))
 
-        label(left, "3. Jeda antar akun", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
+        label(left, "4. Jeda antar akun", 14, "bold").pack(anchor="w", padx=18, pady=(10, 0))
         drow = ctk.CTkFrame(left, fg_color="transparent")
         drow.pack(anchor="w", padx=18, pady=(6, 0))
         self.delay_var = tk.DoubleVar(value=self.cfg["delay"])
@@ -712,14 +731,6 @@ class RegisterPage(ctk.CTkFrame):
         self.delay_lbl.pack(side="left", padx=10)
         self._delay_label()
 
-        ctk.CTkFrame(left, fg_color="transparent").pack(fill="both", expand=True)
-
-        self.start_btn = primary_button(left, "Mulai Daftar", self.start, width=200, height=44)
-        self.start_btn.pack(fill="x", padx=18, pady=(0, 8))
-        self.stop_btn = ctk.CTkButton(left, text="Berhenti", height=44, state="disabled", corner_radius=10,
-                                      fg_color=C_CARD_ALT, hover_color=C_BORDER,
-                                      font=ctk.CTkFont(size=13, weight="bold"), command=self.app.stop_job)
-        self.stop_btn.pack(fill="x", padx=18, pady=(0, 18))
 
     # ---------- kanan: status + akun + log ----------
     def _build_right(self, body):
@@ -779,6 +790,12 @@ class RegisterPage(ctk.CTkFrame):
     # ---------- util ----------
     def _delay_label(self):
         self.delay_lbl.configure(text=f"{self.delay_var.get():.0f} detik")
+
+    def _mode_hint(self):
+        self.mode_hint.configure(text={
+            "Fresh": "Tiap akun dimulai dari /account > Daftar Akun > Nomor Otomatis.",
+            "Tabrak": "Setelah ada hasil, langsung klik 'Daftarkan Ulang Nomor' (tunggu cooldown bila ada), lalu lanjut tanpa mulai dari awal.",
+        }[self.mode_seg.get()])
 
     def _fp_hint(self):
         self.fp_hint.configure(text={
@@ -870,6 +887,7 @@ class RegisterPage(ctk.CTkFrame):
             return
         target = int(raw)
         use_custom = self.fp_seg.get() == "Custom"
+        mode = self.mode_seg.get().casefold()
         delay = float(self.delay_var.get())
 
         self.target, self.ok, self.fail, self.accounts = target, 0, 0, []
@@ -886,7 +904,7 @@ class RegisterPage(ctk.CTkFrame):
                 await shopee_core.start_client(client)
                 print("✅ Terhubung ke Telegram. Mulai mendaftarkan akun...")
                 await daf.run_register_fresh_batch(
-                    client=client, total_target=target, use_custom_fp=use_custom, step_delay=delay,
+                    client=client, total_target=target, use_custom_fp=use_custom, step_delay=delay, mode=mode,
                     on_event=lambda e: LOG_QUEUE.put(("event", e)))
             finally:
                 try:
@@ -1043,7 +1061,7 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         self.title(f"{APP_NAME} v{APP_VERSION}")
         self.geometry("1180x740")
-        self.minsize(1000, 660)
+        self.minsize(1000, 720)
         self.configure(fg_color=C_BG)
 
         self.busy = False

@@ -79,10 +79,11 @@ async def wait_button(client, target_bot: str, base_id: int, match_fn, timeout: 
 
 
 async def click(btn, msg, r: int, c: int):
+    """Klik tombol inline. Mengembalikan jawaban callback (bisa berisi teks popup) atau None."""
     if hasattr(btn, "click") and callable(btn.click):
-        await btn.click()
+        return await btn.click()
     elif hasattr(msg, "click") and callable(msg.click):
-        await msg.click(r, c)
+        return await msg.click(r, c)
     else:
         raise RuntimeError("tombol tidak bisa diklik")
 
@@ -214,29 +215,15 @@ def _is_stored_fp_button(label: str) -> bool:
 # CORE FLOW: DAFTAR 1 AKUN
 # =====================================================================
 
-async def register_one_account(
-    client,
-    target_bot: str = DEFAULT_BOT,
-    use_custom_fp: bool = True,
-    wait_timeout: float = DEFAULT_WAIT_TIMEOUT,
-    on_step=None,
-    poll: float = 1.5,
-) -> Tuple[bool, str, dict]:
-    """Daftarkan 1 akun. Return (sukses, alasan, hasil_parse)."""
-
-    def step(msg: str):
-        if on_step:
-            on_step(msg)
-
-    loop = asyncio.get_running_loop()
-
+async def _open_registration(client, target_bot: str, step) -> Tuple[int, str]:
+    """/account -> Daftar Akun -> Nomor Otomatis. Return (base_id, error)."""
     # 1. /account
     step("Mengirim /account ...")
     try:
         cmd = await client.send_message(target_bot, "/account")
         base_id = cmd.id
     except Exception as exc:
-        return False, f"gagal kirim /account: {exc}", {}
+        return 0, f"gagal kirim /account: {exc}"
     await asyncio.sleep(1.5)
 
     # 2. Klik 'Daftar Akun'
@@ -246,11 +233,11 @@ async def register_one_account(
         lambda l: any(k in l for k in ("daftar akun", "register", "daftar baru", "buat akun")),
         timeout=25.0)
     if not btn:
-        return False, "tombol 'Daftar Akun' tidak ditemukan", {}
+        return 0, "tombol 'Daftar Akun' tidak ditemukan"
     try:
         await click(btn, msg, r, c)
     except Exception as exc:
-        return False, f"gagal klik Daftar Akun: {exc}", {}
+        return 0, f"gagal klik Daftar Akun: {exc}"
     await asyncio.sleep(1.5)
 
     # 3. Klik 'Nomor Otomatis'
@@ -260,12 +247,48 @@ async def register_one_account(
         lambda l: any(k in l for k in ("nomor otomatis", "auto number", "nomor auto")),
         timeout=25.0)
     if not btn:
-        return False, "tombol 'Nomor Otomatis' tidak ditemukan", {}
+        return 0, "tombol 'Nomor Otomatis' tidak ditemukan"
     try:
         await click(btn, msg, r, c)
     except Exception as exc:
-        return False, f"gagal klik Nomor Otomatis: {exc}", {}
+        return 0, f"gagal klik Nomor Otomatis: {exc}"
     await asyncio.sleep(2.0)
+    return base_id, ""
+
+
+async def register_one_account(
+    client,
+    target_bot: str = DEFAULT_BOT,
+    use_custom_fp: bool = True,
+    wait_timeout: float = DEFAULT_WAIT_TIMEOUT,
+    on_step=None,
+    poll: float = 1.5,
+    resume: Optional[dict] = None,
+    ctx: Optional[dict] = None,
+) -> Tuple[bool, str, dict]:
+    """Daftarkan 1 akun. Return (sukses, alasan, hasil_parse).
+
+    resume: {"base_id", "ignore"} untuk melanjutkan tanpa /account (mode tabrak).
+    ctx   : dict yang diisi base_id window pesan percobaan ini.
+    """
+
+    def step(msg: str):
+        if on_step:
+            on_step(msg)
+
+    loop = asyncio.get_running_loop()
+
+    if resume is not None:
+        # Mode tabrak: bot sudah memulai nomor baru lewat "Daftarkan Ulang Nomor"
+        base_id = resume["base_id"]
+        ignore = set(resume.get("ignore", ()))
+    else:
+        ignore = set()
+        base_id, err = await _open_registration(client, target_bot, step)
+        if err:
+            return False, err, {}
+    if ctx is not None:
+        ctx["base_id"] = base_id
 
     # 4. Ikuti state bot: tunggu OTP -> pilih fingerprint -> hasil akhir
     step("Menunggu bot memproses OTP (bot kirim ulang sendiri, harap sabar) ...")
@@ -278,9 +301,11 @@ async def register_one_account(
     while loop.time() < deadline:
         messages = await client.get_messages(target_bot, limit=15)
         bot_msgs = _bot_messages_since(messages, base_id)
+        # pesan lama (sebelum klik "Daftarkan Ulang Nomor") tidak boleh dihitung lagi
+        txt_msgs = [m for m in bot_msgs if (getattr(m, "text", "") or "").strip() not in ignore]
 
         # 4a. Hasil akhir sukses (pesan mana pun)
-        for m in reversed(bot_msgs):
+        for m in reversed(txt_msgs):
             txt = (getattr(m, "text", "") or "").strip()
             if txt and classify_bot_text(txt) == "success":
                 parsed = parse_account_result(txt)
@@ -333,7 +358,7 @@ async def register_one_account(
             break
         else:
             # 4c. Pesan bot terbaru menentukan state: error / menunggu
-            latest = next((m for m in reversed(bot_msgs) if (getattr(m, "text", "") or "").strip()), None)
+            latest = next((m for m in reversed(txt_msgs) if (getattr(m, "text", "") or "").strip()), None)
             if latest is not None:
                 txt = latest.text.strip()
                 state = classify_bot_text(txt)
@@ -356,6 +381,82 @@ async def register_one_account(
 
 
 # =====================================================================
+# MODE TABRAK: klik "Daftarkan Ulang Nomor" (tunggu cooldown bila perlu)
+# =====================================================================
+
+COOLDOWN_RE = re.compile(r"tunggu\s+(\d+)\s*(?:detik|dtk|s\b)", re.IGNORECASE)
+
+
+def parse_cooldown(text: Optional[str]) -> Optional[int]:
+    """Ambil angka dari teks seperti 'Tunggu 21 detik lagi'. None jika tidak ada."""
+    m = COOLDOWN_RE.search(text or "")
+    return int(m.group(1)) if m else None
+
+
+def _is_reregister_button(label: str) -> bool:
+    return "daftarkan ulang" in label or "daftar ulang" in label
+
+
+async def register_again(client, target_bot: str, base_id: int, step=None,
+                         max_cooldowns: int = 30) -> Optional[dict]:
+    """Klik 'Daftarkan Ulang Nomor' pada hasil terakhir.
+
+    Jika bot menjawab popup / pesan 'Tunggu XX detik lagi', tunggu lalu klik lagi.
+    Return dict resume {"base_id", "ignore"} untuk dilanjutkan ke flow fresh
+    (tunggu OTP -> fingerprint -> hasil), atau None bila tombol tidak ada
+    (pemanggil lalu mengulang penuh dari /account).
+    """
+    def say(msg):
+        if step:
+            step(msg)
+
+    for _ in range(max_cooldowns + 1):
+        messages = await client.get_messages(target_bot, limit=15)
+        window = _bot_messages_since(messages, base_id)
+        found = None
+        for m in reversed(window):
+            for r, c, b in _iter_buttons(m):
+                if _is_reregister_button((getattr(b, "text", "") or "").casefold()):
+                    found = (m, r, c, b)
+                    break
+            if found:
+                break
+        if not found:
+            say("Tombol 'Daftarkan Ulang Nomor' tidak ada, ulang dari /account ...")
+            return None
+
+        msg, r, c, btn = found
+        ignore = {(getattr(m, "text", "") or "").strip() for m in window}
+        say(f"Klik '{btn.text}' ...")
+        try:
+            answer = await click(btn, msg, r, c)
+        except Exception as exc:
+            say(f"Gagal klik daftarkan ulang ({exc}), ulang dari /account ...")
+            return None
+
+        cooldown = parse_cooldown(getattr(answer, "message", None))
+        if cooldown is None:  # mungkin muncul sebagai pesan biasa
+            for _ in range(3):
+                await asyncio.sleep(1.0)
+                now = await client.get_messages(target_bot, limit=15)
+                for m in _bot_messages_since(now, base_id):
+                    t = (getattr(m, "text", "") or "").strip()
+                    if t and t not in ignore:
+                        cooldown = parse_cooldown(t)
+                        if cooldown is not None:
+                            break
+                if cooldown is not None:
+                    break
+        if cooldown is None:
+            return {"base_id": msg.id - 1, "ignore": ignore}
+
+        say(f"Cooldown dari bot: tunggu {cooldown} detik ...")
+        await asyncio.sleep(cooldown + 1)
+    say("Cooldown terlalu lama, ulang dari /account ...")
+    return None
+
+
+# =====================================================================
 # BATCH RUNNER
 # =====================================================================
 
@@ -366,11 +467,16 @@ async def run_register_fresh_batch(
     use_custom_fp: bool = True,
     step_delay: float = 5.0,
     retry_delay: float = 3.0,
+    mode: str = "fresh",
     output_file: Union[str, Path] = DEFAULT_OUTPUT_FILE,
     cookie_file: Union[str, Path] = DEFAULT_COOKIE_FILE,
     on_event=None,
 ) -> dict:
     """Ulangi flow dari /account sampai jumlah akun target tercapai.
+
+    mode="fresh"  : tiap percobaan mulai dari /account.
+    mode="tabrak" : setelah ada hasil (sukses/gagal) langsung klik "Daftarkan Ulang Nomor",
+                    tunggu cooldown bila ada, lalu lanjut flow (OTP -> fingerprint -> hasil).
 
     Berhenti lewat Ctrl+C / membatalkan task (tombol Berhenti di aplikasi).
     on_event(dict): type = attempt | step | attempt_fail | success | done
@@ -391,6 +497,7 @@ async def run_register_fresh_batch(
     print(f"{CYAN}===================================================={RESET}")
     print(f"🤖 Bot         : {BOLD}{target_bot}{RESET}")
     print(f"🎯 Target akun : {BOLD}{total_target}{RESET}")
+    print(f"⚙️  Mode        : {BOLD}{'Tabrak (Daftarkan Ulang Nomor)' if mode == 'tabrak' else 'Fresh'}{RESET}")
     print(f"🔑 Fingerprint : {BOLD}{'Custom' if use_custom_fp else 'Otomatis'}{RESET}")
     print(f"📂 Hasil       : {output_file}")
     print(f"{CYAN}----------------------------------------------------{RESET}\n")
@@ -399,6 +506,11 @@ async def run_register_fresh_batch(
     fail_count = 0
     attempts = 0
     results = []
+    resume = None
+
+    def on_step(m):
+        print(f"  ├─ {m}")
+        emit(type="step", text=m)
 
     try:
         while success_count < total_target:
@@ -406,16 +518,20 @@ async def run_register_fresh_batch(
             bar = shopee_core.render_progress_bar(success_count, total_target)
             print(f"{CYAN}{bar}{RESET} Percobaan ke-{attempts} (butuh {total_target - success_count} lagi)")
             emit(type="attempt", index=attempts, success=success_count, fail=fail_count, target=total_target)
+            ctx = {}
             try:
                 ok, reason, parsed = await register_one_account(
                     client, target_bot=target_bot, use_custom_fp=use_custom_fp,
-                    on_step=lambda m: (print(f"  ├─ {m}"), emit(type="step", text=m)))
+                    on_step=on_step, resume=resume, ctx=ctx)
+                resume = None
             except FloodWaitError as exc:
                 print(f"  └─ {YELLOW}⚠️ Telegram FloodWait {exc.seconds} dtk, istirahat dulu ...{RESET}")
                 emit(type="step", text=f"FloodWait {exc.seconds} dtk, menunggu ...")
+                resume = None
                 await asyncio.sleep(exc.seconds + 3)
                 continue
             except Exception as exc:
+                resume = None
                 ok, reason, parsed = False, f"exception: {exc}", {}
 
             if ok:
@@ -425,15 +541,23 @@ async def run_register_fresh_batch(
                 print(f"  └─ {GREEN}{BOLD}✅ Akun berhasil: {parsed.get('username')} | UID {parsed.get('user_id')}{RESET}\n")
                 emit(type="success", result=parsed, success=success_count, fail=fail_count, target=total_target)
                 if success_count < total_target:
-                    await asyncio.sleep(step_delay)
+                    if mode == "tabrak":
+                        resume = await register_again(client, target_bot, ctx.get("base_id", 0), on_step)
+                    else:
+                        await asyncio.sleep(step_delay)
             else:
                 fail_count += 1
                 save_failed_account(reason)
                 results.append({"attempt": attempts, "success": False, "reason": reason})
                 print(f"  └─ {YELLOW}⚠️ Gagal: {reason}{RESET}")
-                print(f"  ↻ Ulang dari /account ...\n")
                 emit(type="attempt_fail", reason=reason)
-                await asyncio.sleep(retry_delay)
+                if mode == "tabrak" and ctx.get("base_id"):
+                    resume = await register_again(client, target_bot, ctx["base_id"], on_step)
+                if resume is None:
+                    print(f"  ↻ Ulang dari /account ...\n")
+                    await asyncio.sleep(retry_delay)
+                else:
+                    print(f"  ↻ Lanjut dengan nomor baru ...\n")
     except (KeyboardInterrupt, asyncio.CancelledError):
         print(f"\n{YELLOW}Dihentikan oleh pengguna.{RESET}")
 
@@ -464,6 +588,8 @@ async def interactive_register_menu():
     print("Jika bot gagal, proses diulang dari /account sampai target tercapai. Ctrl+C untuk berhenti.\n")
     raw = _ask("Mau daftar berapa akun?", "10")
     total = int(raw) if raw.isdigit() and int(raw) > 0 else 10
+    print("  [1] Fresh  (tiap akun mulai dari /account)\n  [2] Tabrak (klik 'Daftarkan Ulang Nomor' setelah hasil)")
+    mode = "tabrak" if _ask("Pilih mode", "1") == "2" else "fresh"
     print("  [1] Fingerprint Custom\n  [2] Fingerprint Otomatis")
     use_custom = _ask("Pilih fingerprint", "1") != "2"
     delay = 6.0
@@ -475,7 +601,7 @@ async def interactive_register_menu():
     client = shopee_core.create_client()
     try:
         await shopee_core.start_client(client)
-        await run_register_fresh_batch(client, total_target=total, use_custom_fp=use_custom, step_delay=delay)
+        await run_register_fresh_batch(client, total_target=total, use_custom_fp=use_custom, step_delay=delay, mode=mode)
     finally:
         try:
             await client.disconnect()
