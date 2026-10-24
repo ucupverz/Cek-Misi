@@ -65,6 +65,17 @@ class FakeBot:
 
     def _pick_fp(self, label):
         self.clicked.append(label)
+        if label == "Fingerprint Custom":
+            self.add("Kirim fingerprint custom (paste di sini),\natau pakai salah satu dari stok tersimpan:",
+                     buttons=[[Btn("Gunakan Fingerprint Tersimpan", self._use_stored)]])
+            return
+        self._finish_fp()
+
+    def _use_stored(self):
+        self.clicked.append("Gunakan Fingerprint Tersimpan")
+        self._finish_fp()
+
+    def _finish_fp(self):
         self.phase, self.t0 = "result", self.polls
         self.add("⏳ Memproses...")
 
@@ -78,7 +89,7 @@ class FakeBot:
                     self.add("❌ OTP tak masuk di 2 nomor (masing-masing 2x kirim). Coba lagi /account.")
                     self.phase = "done"
                 else:
-                    self.add("✅ OTP benar.")
+                    self.add("✅ OTP terverifikasi. Nomor: 628111")
                     self.add("Pilih metode fingerprint:", buttons=[[
                         Btn("Fingerprint Otomatis", lambda: self._pick_fp("Fingerprint Otomatis")),
                         Btn("Fingerprint Custom", lambda: self._pick_fp("Fingerprint Custom"))]])
@@ -106,7 +117,8 @@ class RegisterFlowTests(unittest.TestCase):
         self.assertTrue(ok, reason)
         self.assertEqual(parsed["username"], "user1")
         self.assertEqual(bot.sent, ["/account"])  # tidak ada string fingerprint / OTP dikirim
-        self.assertEqual(bot.clicked, ["Daftar Akun", "Nomor Otomatis", "Fingerprint Custom"])
+        self.assertEqual(bot.clicked, ["Daftar Akun", "Nomor Otomatis", "Fingerprint Custom",
+                                         "Gunakan Fingerprint Tersimpan"])
 
     def test_success_automatic_fingerprint(self):
         bot, (ok, _r, _p) = run(["ok"], use_custom_fp=False)
@@ -144,7 +156,7 @@ class RegisterFlowTests(unittest.TestCase):
     def test_classify(self):
         c = daf.classify_bot_text
         self.assertEqual(c("⏳ Menunggu OTP masuk... (maks 61 detik) · kirim ulang #1"), "waiting")
-        self.assertEqual(c("✅ OTP benar."), "otp_ok")
+        self.assertEqual(c("✅ OTP terverifikasi. Nomor: 6285119299288"), "otp_ok")
         self.assertEqual(c("❌ OTP tak masuk di 2 nomor. Coba lagi /account."), "error")
         self.assertEqual(c(RESULT), "success")
 

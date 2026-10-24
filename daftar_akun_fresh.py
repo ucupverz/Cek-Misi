@@ -8,6 +8,7 @@ Flow (mengikuti respons bot / stateful):
    a. "OTP tak masuk ... Coba lagi /account" / error lain -> gagal, ulang dari /account
    b. "OTP benar" + tombol "Fingerprint Otomatis" / "Fingerprint Custom"
       -> klik tombol sesuai pilihan (TIDAK ada string fingerprint yang dikirim ke chat)
+   (untuk Custom: bot lalu menampilkan tombol "Gunakan Fingerprint Tersimpan" -> diklik juga)
 3. Tunggu hasil akhir akun (username / password / UserID / cookie) lalu simpan.
 """
 
@@ -193,7 +194,7 @@ def classify_bot_text(text: str) -> str:
         return "success"
     if "menunggu otp" in low or "memproses" in low or "mohon tunggu" in low or "loading" in low:
         return "waiting"
-    if "otp benar" in low:
+    if "otp benar" in low or "otp terverifikasi" in low:
         return "otp_ok"
     if "❌" in text or any(k in low for k in _ERROR_KEYS):
         return "error"
@@ -202,6 +203,11 @@ def classify_bot_text(text: str) -> str:
 
 def _is_fp_button(label: str) -> bool:
     return "fingerprint" in label and ("custom" in label or "otomatis" in label)
+
+
+def _is_stored_fp_button(label: str) -> bool:
+    """Tombol 'Gunakan Fingerprint Tersimpan' (muncul setelah memilih Fingerprint Custom)."""
+    return "tersimpan" in label
 
 
 # =====================================================================
@@ -265,6 +271,7 @@ async def register_one_account(
     step("Menunggu bot memproses OTP (bot kirim ulang sendiri, harap sabar) ...")
     fp_wanted = "custom" if use_custom_fp else "otomatis"
     fp_clicked_ids = set()
+    stored_clicked_ids = set()
     last_state = ""
     deadline = loop.time() + wait_timeout
 
@@ -280,6 +287,29 @@ async def register_one_account(
                 if parsed.get("success"):
                     return True, "ok", parsed
                 return False, parsed.get("error") or "hasil tidak valid", parsed
+
+        # 4b0. Setelah Fingerprint Custom: klik 'Gunakan Fingerprint Tersimpan'
+        stored = None
+        for m in reversed(bot_msgs):
+            if m.id in stored_clicked_ids:
+                continue
+            for r2, c2, b in _iter_buttons(m):
+                if _is_stored_fp_button((getattr(b, "text", "") or "").casefold()):
+                    stored = (m, r2, c2, b)
+                    break
+            if stored:
+                break
+        if stored:
+            m, r2, c2, b = stored
+            step(f"Klik '{b.text}' ...")
+            try:
+                await click(b, m, r2, c2)
+            except Exception as exc:
+                return False, f"gagal klik fingerprint tersimpan: {exc}", {}
+            stored_clicked_ids.add(m.id)
+            last_state = "fp"
+            await asyncio.sleep(2.0)
+            continue
 
         # 4b. Tombol pilihan fingerprint (OTP sudah benar)
         for m in reversed(bot_msgs):
@@ -320,7 +350,7 @@ async def register_one_account(
                     step("Fingerprint dipilih, menunggu hasil akun ...")
         await asyncio.sleep(poll)
 
-    if fp_clicked_ids:
+    if fp_clicked_ids or stored_clicked_ids:
         return False, "timeout menunggu hasil akhir setelah fingerprint", {}
     return False, "timeout menunggu OTP / respons bot", {}
 
@@ -357,7 +387,7 @@ async def run_register_fresh_batch(
         return {"total": 0, "success": 0, "fail": 0, "results": []}
 
     print(f"\n{CYAN}{BOLD}===================================================={RESET}")
-    print(f"📝 {BOLD}DAFTAR AKUN FRESH SHOPEEFOOD{RESET}")
+    print(f"📝 {BOLD}DAFTAR AKUN{RESET}")
     print(f"{CYAN}===================================================={RESET}")
     print(f"🤖 Bot         : {BOLD}{target_bot}{RESET}")
     print(f"🎯 Target akun : {BOLD}{total_target}{RESET}")
@@ -428,7 +458,7 @@ def _ask(prompt: str, default: str = "") -> str:
 
 async def interactive_register_menu():
     print(f"\n{CYAN}{BOLD}===================================================={RESET}")
-    print(f"📝 {BOLD}DAFTAR AKUN FRESH ({DEFAULT_BOT}){RESET}")
+    print(f"📝 {BOLD}DAFTAR AKUN ({DEFAULT_BOT}){RESET}")
     print(f"{CYAN}===================================================={RESET}")
     print("Otomatis: /account > Daftar Akun > Nomor Otomatis > (bot urus OTP) > pilih fingerprint.")
     print("Jika bot gagal, proses diulang dari /account sampai target tercapai. Ctrl+C untuk berhenti.\n")

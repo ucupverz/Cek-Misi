@@ -115,8 +115,8 @@ FEATURES = {
         "hint": "Satu username (atau raw cookie) per baris.",
     },
     "register": {
-        "nav": "Daftar Akun Fresh",
-        "title": "Daftar Akun Fresh ShopeeFood",
+        "nav": "Daftar Akun",
+        "title": "Daftar Akun",
         "desc": "Daftarkan akun ShopeeFood baru otomatis lewat @shp_tools_bot: nomor otomatis, OTP (diurus bot), pilih fingerprint, lalu simpan hasilnya. Gagal? Diulang otomatis dari /account.",
         "delay": 6.0,
         "hint": "",
