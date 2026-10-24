@@ -63,6 +63,7 @@ import customtkinter as ctk  # noqa: E402
 from telethon.errors import FloodWaitError  # noqa: E402,F401
 
 import cek_misi_termux  # noqa: E402
+import daftar_akun_fresh as daf  # noqa: E402
 import shopee_core  # noqa: E402
 import voucher_claim  # noqa: E402
 
@@ -113,6 +114,13 @@ FEATURES = {
         "delay": 2.5,
         "hint": "Satu username (atau raw cookie) per baris.",
     },
+    "register": {
+        "nav": "Daftar Akun Fresh",
+        "title": "Daftar Akun Fresh ShopeeFood",
+        "desc": "Daftarkan akun ShopeeFood baru otomatis lewat @shp_tools_bot: nomor otomatis, OTP, fingerprint, lalu simpan hasilnya. Gagal? Diulang otomatis.",
+        "delay": 6.0,
+        "hint": "",
+    },
 }
 
 RESULT_FILES = [
@@ -123,6 +131,9 @@ RESULT_FILES = [
     ("diskon_25rb.txt", "Akun diskon 25RB"),
     ("misi_selesai.txt", "Misi selesai"),
     ("bot_responses.txt", "Respons klaim voucher"),
+    ("akun_fresh.txt", "Akun fresh hasil daftar"),
+    ("akun_fresh_cookies.txt", "Cookie akun fresh"),
+    ("akun_fresh_failed.txt", "Pendaftaran gagal"),
 ]
 
 
@@ -638,6 +649,287 @@ class TaskPage(ctk.CTkFrame):
 
 
 # =====================================================================
+# Halaman: Daftar Akun Fresh
+# =====================================================================
+class RegisterPage(ctk.CTkFrame):
+    OTP_CHOICES = {"Bot Telegram": "bot", "SMS forwarder": "sms", "Ketik manual": "input"}
+    PROG_RE = re.compile(r"^\[[█░]+\]\s*([\d.]+)%\s*\((\d+)/(\d+)\)")
+
+    def __init__(self, master, app):
+        super().__init__(master, fg_color="transparent")
+        self.app = app
+        self.mode = "register"
+        self.cfg = FEATURES["register"]
+        self.target = 0
+        self.ok = self.fail = 0
+        self.accounts = []
+
+        label(self, self.cfg["title"], 24, "bold").pack(anchor="w")
+        label(self, self.cfg["desc"], 12, color=C_MUTED, wraplength=820, justify="left").pack(
+            anchor="w", pady=(2, 14))
+
+        body = ctk.CTkFrame(self, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        body.grid_columnconfigure(0, weight=4, uniform="a", minsize=300)
+        body.grid_columnconfigure(1, weight=6, uniform="a")
+        body.grid_rowconfigure(0, weight=1)
+        self._build_left(body)
+        self._build_right(body)
+
+    # ---------- kiri: pengaturan + kontrol ----------
+    def _build_left(self, body):
+        left = card(body)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 9))
+
+        label(left, "1. Jumlah akun", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
+        label(left, "Berapa akun fresh yang ingin didapat.", 11, color=C_MUTED).pack(anchor="w", padx=18)
+        self.target_entry = ctk.CTkEntry(left, height=38, width=120, fg_color=C_CARD_ALT, border_color=C_BORDER)
+        self.target_entry.insert(0, "10")
+        self.target_entry.pack(anchor="w", padx=18, pady=(8, 0))
+
+        label(left, "2. Sumber OTP", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
+        self.otp_hint = label(left, "", 11, color=C_MUTED, wraplength=300, justify="left")
+        self.otp_hint.pack(anchor="w", padx=18)
+        self.otp_seg = ctk.CTkSegmentedButton(
+            left, values=list(self.OTP_CHOICES), selected_color=C_ACCENT,
+            selected_hover_color=C_ACCENT_HOVER, unselected_color=C_CARD_ALT,
+            unselected_hover_color=C_BORDER, fg_color=C_CARD_ALT, command=lambda _v: self._otp_hint())
+        self.otp_seg.set("Bot Telegram")
+        self.otp_seg.pack(anchor="w", padx=18, pady=(8, 0))
+        self._otp_hint()
+
+        label(left, "3. Jeda antar akun", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
+        drow = ctk.CTkFrame(left, fg_color="transparent")
+        drow.pack(anchor="w", padx=18, pady=(6, 0))
+        self.delay_var = tk.DoubleVar(value=self.cfg["delay"])
+        slider = ctk.CTkSlider(drow, from_=1, to=20, number_of_steps=19, width=190, variable=self.delay_var,
+                               button_color=C_ACCENT, button_hover_color=C_ACCENT_HOVER, progress_color=C_ACCENT,
+                               command=lambda _v: self._delay_label())
+        slider.set(self.cfg["delay"])
+        slider.pack(side="left")
+        self.delay_lbl = label(drow, "", 12)
+        self.delay_lbl.pack(side="left", padx=10)
+        self._delay_label()
+
+        ctk.CTkFrame(left, fg_color="transparent").pack(fill="both", expand=True)
+
+        self.start_btn = primary_button(left, "Mulai Daftar", self.start, width=200, height=44)
+        self.start_btn.pack(fill="x", padx=18, pady=(0, 8))
+        self.stop_btn = ctk.CTkButton(left, text="Berhenti", height=44, state="disabled", corner_radius=10,
+                                      fg_color=C_CARD_ALT, hover_color=C_BORDER,
+                                      font=ctk.CTkFont(size=13, weight="bold"), command=self.app.stop_job)
+        self.stop_btn.pack(fill="x", padx=18, pady=(0, 18))
+
+    # ---------- kanan: status + akun + log ----------
+    def _build_right(self, body):
+        right = ctk.CTkFrame(body, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="nsew", padx=(9, 0))
+        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
+        right.grid_columnconfigure(0, weight=1)
+
+        st = card(right)
+        st.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        top = ctk.CTkFrame(st, fg_color="transparent")
+        top.pack(fill="x", padx=16, pady=(14, 4))
+        self.state_lbl = label(top, "Siap. Atur jumlah akun lalu klik Mulai Daftar.", 12, color=C_MUTED,
+                               wraplength=420, justify="left")
+        self.state_lbl.pack(side="left")
+        self.progress = ctk.CTkProgressBar(st, height=10, progress_color=C_ACCENT, fg_color=C_CARD_ALT)
+        self.progress.set(0)
+        self.progress.pack(fill="x", padx=16, pady=(4, 6))
+        stats = ctk.CTkFrame(st, fg_color="transparent")
+        stats.pack(fill="x", padx=16, pady=(0, 14))
+        self.prog_lbl = label(stats, "0 / 0 akun", 12, color=C_MUTED)
+        self.prog_lbl.pack(side="left")
+        self.fail_lbl = label(stats, "Percobaan gagal 0", 12, color=C_ERR)
+        self.fail_lbl.pack(side="right")
+        self.ok_lbl = label(stats, "Berhasil 0", 12, color=C_OK)
+        self.ok_lbl.pack(side="right", padx=14)
+
+        ac = card(right)
+        ac.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        ah = ctk.CTkFrame(ac, fg_color="transparent")
+        ah.pack(fill="x", padx=16, pady=(12, 0))
+        label(ah, "Akun berhasil", 14, "bold").pack(side="left")
+        ghost_button(ah, "Salin semua", self.copy_all, width=90, height=26).pack(side="right")
+        ghost_button(ah, "Buka folder", lambda: open_path(BASE_DIR), width=90, height=26).pack(side="right", padx=6)
+        self.acc_box = ctk.CTkTextbox(ac, fg_color=C_CARD_ALT, border_width=0, corner_radius=10,
+                                      font=ctk.CTkFont(family="Consolas", size=12), text_color=C_OK,
+                                      wrap="none", state="disabled")
+        self.acc_box.pack(fill="both", expand=True, padx=16, pady=(8, 4))
+        label(ac, "Format: username|password|UID|nomor  •  tersimpan juga di akun_fresh.txt",
+              11, color=C_MUTED).pack(anchor="w", padx=16, pady=(0, 12))
+
+        lc = card(right)
+        lc.grid(row=2, column=0, sticky="nsew")
+        lh = ctk.CTkFrame(lc, fg_color="transparent")
+        lh.pack(fill="x", padx=16, pady=(12, 0))
+        label(lh, "Log", 14, "bold").pack(side="left")
+        ghost_button(lh, "Bersihkan", self.clear_log, width=80, height=26).pack(side="right")
+        ghost_button(lh, "Edit fingerprint", self.edit_fp, width=110, height=26).pack(side="right", padx=6)
+        self.log = ctk.CTkTextbox(lc, fg_color=C_BG, border_width=0, corner_radius=10,
+                                  font=ctk.CTkFont(family="Consolas", size=12), text_color=C_TEXT,
+                                  wrap="word", state="disabled")
+        self.log.pack(fill="both", expand=True, padx=16, pady=10)
+        tb = self.log._textbox
+        for name, col in (("ok", C_OK), ("warn", C_WARN), ("err", C_ERR), ("info", C_INFO), ("muted", C_MUTED)):
+            tb.tag_configure(name, foreground=col)
+
+    # ---------- util ----------
+    def _delay_label(self):
+        self.delay_lbl.configure(text=f"{self.delay_var.get():.0f} detik")
+
+    def _otp_hint(self):
+        src = self.OTP_CHOICES[self.otp_seg.get()]
+        self.otp_hint.configure(text={
+            "bot": "OTP dibaca otomatis dari pesan bot. Paling umum.",
+            "sms": "OTP dibaca dari file otp_inbox.txt (format: nomor|otp).",
+            "input": "Kotak input muncul setiap OTP dibutuhkan.",
+        }[src])
+
+    def edit_fp(self):
+        daf.load_fingerprints()
+        open_path(daf.DEFAULT_FINGERPRINT_FILE.resolve())
+
+    def clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+    def copy_all(self):
+        if not self.accounts:
+            self.state_lbl.configure(text="Belum ada akun untuk disalin.", text_color=C_WARN)
+            return
+        self.clipboard_clear()
+        self.clipboard_append("\n".join(f"{a.get('username')}|{a.get('password')}" for a in self.accounts))
+        self.state_lbl.configure(text=f"{len(self.accounts)} akun disalin ke clipboard.", text_color=C_OK)
+
+    def _append(self, text, tag=None):
+        for k, v in TaskPage.EMOJI_MAP.items():
+            text = text.replace(k, v)
+        text = text.replace("\ufe0f", "")
+        self.log.configure(state="normal")
+        self.log._textbox.insert("end", text + "\n", tag if tag else ())
+        self.log.configure(state="disabled")
+        self.log.see("end")
+
+    def _refresh_stats(self):
+        self.ok_lbl.configure(text=f"Berhasil {self.ok}")
+        self.fail_lbl.configure(text=f"Percobaan gagal {self.fail}")
+        self.prog_lbl.configure(text=f"{self.ok} / {self.target} akun")
+        self.progress.set(min(1.0, self.ok / self.target) if self.target else 0)
+
+    # ---------- log & event ----------
+    def handle_line(self, line: str):
+        s = line.strip()
+        if not s or self.PROG_RE.match(s):
+            return
+        tag = None
+        if "✅" in s:
+            tag = "ok"
+        elif "⚠" in s or "↻" in s:
+            tag = "warn"
+        elif "❌" in s:
+            tag = "err"
+        elif "├─" in s:
+            tag = "muted"
+        elif re.fullmatch(r"[=\-─━]{5,}", s):
+            tag = "muted"
+        self._append(line, tag)
+
+    def handle_event(self, e: dict):
+        t = e.get("type")
+        if t == "attempt":
+            self.state_lbl.configure(text=f"Mendaftarkan akun {self.ok + 1} dari {self.target} ...",
+                                     text_color=C_TEXT)
+        elif t == "step":
+            self.state_lbl.configure(text=e.get("text", ""), text_color=C_MUTED)
+        elif t == "attempt_fail":
+            self.fail += 1
+            self.state_lbl.configure(text=f"Gagal: {e.get('reason')}. Mengulang otomatis ...", text_color=C_WARN)
+            self._refresh_stats()
+        elif t == "success":
+            r = e.get("result", {})
+            self.ok = e.get("success", self.ok)
+            self.accounts.append(r)
+            self.acc_box.configure(state="normal")
+            self.acc_box.insert("end", f"{r.get('username') or '-'}|{r.get('password') or '-'}|"
+                                       f"{r.get('user_id') or '-'}|{r.get('phone') or '-'}\n")
+            self.acc_box.configure(state="disabled")
+            self.acc_box.see("end")
+            self.state_lbl.configure(text=f"Berhasil: {r.get('username')}", text_color=C_OK)
+            self._refresh_stats()
+
+    # ---------- eksekusi ----------
+    def start(self):
+        if self.app.busy:
+            return
+        api_id, api_hash = shopee_core.load_credentials()
+        if not (api_id and api_hash):
+            messagebox.showinfo(APP_NAME, "API ID & API HASH Telegram belum diisi.\nIsi dulu di menu Pengaturan.")
+            self.app.show("settings")
+            return
+        raw = self.target_entry.get().strip()
+        if not raw.isdigit() or int(raw) < 1:
+            messagebox.showwarning(APP_NAME, "Isi jumlah akun dengan angka minimal 1.")
+            return
+        target = int(raw)
+        otp_src = self.OTP_CHOICES[self.otp_seg.get()]
+        delay = float(self.delay_var.get())
+
+        self.target, self.ok, self.fail, self.accounts = target, 0, 0, []
+        self.acc_box.configure(state="normal")
+        self.acc_box.delete("1.0", "end")
+        self.acc_box.configure(state="disabled")
+        self._refresh_stats()
+        self.state_lbl.configure(text="Menghubungkan ke Telegram ...", text_color=C_INFO)
+
+        def ask_otp():
+            try:
+                prompt = ("Masukkan kode OTP yang Anda terima" if otp_src == "input"
+                          else "OTP otomatis tidak masuk. Ketik kode OTP manual (Batal untuk lewati)")
+                return input(prompt) or None
+            except EOFError:
+                return None
+
+        async def job():
+            sessions = shopee_core.get_available_telegram_sessions()
+            client = shopee_core.create_client(sessions[0] if sessions else None)
+            try:
+                await shopee_core.start_client(client)
+                print("✅ Terhubung ke Telegram. Mulai mendaftarkan akun...")
+                loop = asyncio.get_running_loop()
+
+                async def manual(_phone):
+                    return await loop.run_in_executor(None, ask_otp)
+
+                await daf.run_register_fresh_batch(
+                    client=client, total_target=target, otp_source=otp_src, step_delay=delay,
+                    manual_otp_callback=manual, on_event=lambda e: LOG_QUEUE.put(("event", e)))
+            finally:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+        self.app.run_job(job, self)
+
+    def set_running(self, running: bool):
+        self.start_btn.configure(state="disabled" if running else "normal",
+                                 text="Berjalan..." if running else "Mulai Daftar")
+        self.stop_btn.configure(state="normal" if running else "disabled",
+                                fg_color=C_ERR if running else C_CARD_ALT,
+                                hover_color="#e04848" if running else C_BORDER)
+        if running:
+            self.state_lbl.configure(text="Sedang berjalan. Klik Berhenti kapan saja.", text_color=C_WARN)
+        else:
+            self.state_lbl.configure(
+                text=f"Selesai. {self.ok} dari {self.target} akun berhasil. Hasil tersimpan di akun_fresh.txt.",
+                text_color=C_OK if self.ok >= self.target else C_WARN)
+
+
+# =====================================================================
 # Halaman: Pengaturan
 # =====================================================================
 class SettingsPage(ctk.CTkFrame):
@@ -788,7 +1080,7 @@ class App(ctk.CTk):
 
         self.pages = {"home": HomePage(self.content, self)}
         for k in FEATURES:
-            self.pages[k] = TaskPage(self.content, self, k)
+            self.pages[k] = RegisterPage(self.content, self) if k == "register" else TaskPage(self.content, self, k)
         self.pages["settings"] = SettingsPage(self.content, self)
 
         self.show("home")
@@ -883,6 +1175,10 @@ class App(ctk.CTk):
         if loop and task and not task.done():
             loop.call_soon_threadsafe(task.cancel)
             self.run_dot.configure(text="Menghentikan...")
+            # tutup kotak input yang masih terbuka agar proses tidak menggantung
+            for w in self.winfo_children():
+                if isinstance(w, PromptDialog):
+                    w._finish(None)
 
     # ---------- jembatan input() dari thread kerja ----------
     def _thread_input(self, prompt="", secret=False):
@@ -910,6 +1206,9 @@ class App(ctk.CTk):
                 if kind == "log":
                     if page:
                         page.handle_line(payload)
+                elif kind == "event":
+                    if page and hasattr(page, "handle_event"):
+                        page.handle_event(payload)
                 elif kind == "ask":
                     prompt, secret, on_done = payload
                     PromptDialog(self, prompt, secret, on_done)
