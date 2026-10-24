@@ -47,3 +47,14 @@ ENV/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Hasil & data daftar akun fresh
+akun_fresh*.txt
+fingerprints.json
+otp_inbox.txt
+nomor.txt
+
+# Build EXE
+build/
+dist/
+*.spec
