@@ -366,7 +366,16 @@ async def run_register_fresh_batch(
     output_file: Union[str, Path] = DEFAULT_OUTPUT_FILE,
     cookie_file: Union[str, Path] = DEFAULT_COOKIE_FILE,
     manual_otp_callback=None,
+    on_event=None,
 ) -> dict:
+    """on_event(dict) opsional: type = attempt | step | success | fail | done."""
+    def emit(**kw):
+        if on_event:
+            try:
+                on_event(kw)
+            except Exception:
+                pass
+
 
     if total_target <= 0:
         print(f"{RED}❌ Target harus lebih dari 0.{RESET}")
@@ -392,6 +401,7 @@ async def run_register_fresh_batch(
     try:
         while success_count < total_target and not stop_all:
             global_idx += 1
+            emit(type="attempt", index=global_idx, success=success_count, fail=fail_count, target=total_target)
             bar = shopee_core.render_progress_bar(success_count, total_target)
             print(f"{CYAN}{bar}{RESET} Akun {success_count + 1}/{total_target} "
                   f"(butuh {total_target - success_count} lagi)")
@@ -409,16 +419,18 @@ async def run_register_fresh_batch(
                     ok, reason, parsed = await register_one_account(
                         client=client, target_bot=target_bot, otp_source=otp_source,
                         otp_timeout=otp_timeout, manual_otp_callback=manual_otp_callback,
-                        fp_index=global_idx, on_step=lambda m: print(f"  ├─ {m}"),
+                        fp_index=global_idx, on_step=lambda m: (print(f"  ├─ {m}"), emit(type="step", text=m)),
                     )
                     last_reason = reason
                     if ok:
                         save_fresh_account(parsed, output_file, cookie_file)
                         print(f"  └─ {GREEN}{BOLD}✅ Berhasil: {parsed.get('username')} | UID {parsed.get('user_id')}{RESET}")
                         success_count += 1
+                        emit(type="success", result=parsed, success=success_count, fail=fail_count, target=total_target)
                         results.append({"attempt": global_idx, "success": True, "result": parsed})
                     else:
                         print(f"  └─ {YELLOW}⚠️ Gagal: {reason}{RESET}")
+                        emit(type="attempt_fail", reason=reason)
                 except FloodWaitError as exc:
                     print(f"  └─ {RED}⚠️ Telegram FloodWait {exc.seconds} dtk. Proses dihentikan.{RESET}")
                     last_reason = f"FloodWait {exc.seconds}s"
@@ -431,6 +443,7 @@ async def run_register_fresh_batch(
             if not ok:
                 save_failed_account("OTOMATIS", last_reason or "gagal semua retry")
                 fail_count += 1
+                emit(type="fail", reason=last_reason, success=success_count, fail=fail_count, target=total_target)
                 results.append({"attempt": global_idx, "success": False, "reason": last_reason})
 
             print()
@@ -446,6 +459,7 @@ async def run_register_fresh_batch(
     print(f"{RED}❌ Gagal            : {fail_count}{RESET}")
     print(f"📂 File hasil       : {output_file} & {cookie_file}\n")
 
+    emit(type="done", success=success_count, fail=fail_count, target=total_target, attempts=global_idx)
     return {"total": total_target, "success": success_count, "fail": fail_count, "results": results}
 
 # =====================================================================

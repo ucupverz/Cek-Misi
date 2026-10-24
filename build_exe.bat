@@ -1,8 +1,8 @@
 @echo off
 chcp 65001 >nul
-title Build ShopeeBot EXE
+title Build Shopee Tools EXE
 echo ====================================================
-echo   BUILD SHOPEE BOT ALL-IN-ONE (.exe)
+echo   BUILD SHOPEE TOOLS (.exe)
 echo ====================================================
 echo.
 where python >nul 2>nul
@@ -12,23 +12,29 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [1/3] Memasang dependensi...
+echo [1/4] Memasang dependensi...
 python -m pip install -r requirements.txt pyinstaller
 if errorlevel 1 goto :fail
 echo.
-echo [2/3] Membuat file .exe (tunggu 1-3 menit)...
-python -m PyInstaller --onefile --console --clean --name ShopeeBot ^
+echo [2/4] Membuat DaftarAkunFresh.exe (aplikasi dengan tampilan jendela)...
+python -m PyInstaller --onefile --windowed --clean --name DaftarAkunFresh ^
+    --hidden-import shopee_core --hidden-import daftar_akun_fresh ^
+    gui_daftar_akun.py
+if errorlevel 1 goto :fail
+echo.
+echo [3/4] Membuat ShopeeBot.exe (menu konsol: cek misi, voucher, dll)...
+python -m PyInstaller --onefile --console --name ShopeeBot ^
     --hidden-import daftar_akun_fresh --hidden-import voucher_claim ^
     --hidden-import food --hidden-import shopee_core ^
     cek_misi_termux.py
 if errorlevel 1 goto :fail
 echo.
-echo [3/3] Selesai!
+echo [4/4] Selesai!
 echo.
-echo  File EXE : dist\ShopeeBot.exe
-echo  Jalankan : double-click ShopeeBot.exe
-echo  Tips     : taruh file nomor.txt / accounts.txt di folder yang sama
-echo             dengan ShopeeBot.exe agar terbaca otomatis.
+echo  dist\DaftarAkunFresh.exe  - Daftar akun fresh (tampilan jendela, ada tombol STOP)
+echo  dist\ShopeeBot.exe        - Menu konsol lengkap
+echo.
+echo  Tips: sesi Telegram dan hasil disimpan di folder yang sama dengan file .exe.
 echo.
 pause
 exit /b 0
