@@ -318,6 +318,7 @@ class TestVoucherClaimModule(unittest.IsolatedAsyncioTestCase):
                     stats = await voucher_claim.run_voucher_claim_mode(
                         client=client,
                         accounts=accounts,
+                        voucher_link="https://shopee.co.id/voucher/test",
                         output_file=out_file,
                         step_delay=0.01,
                     )
@@ -332,6 +333,30 @@ class TestVoucherClaimModule(unittest.IsolatedAsyncioTestCase):
         self.assertIn("user_1", saved_text)
         self.assertIn("BERHASIL", saved_text)
         self.assertIn("FloodWait", saved_text)
+
+    # 7b. Satu akun mengklaim kedua voucher (NEWFOODIES + ONGKIRGRATIS)
+    async def test_run_voucher_claim_mode_claims_both_vouchers_per_account(self):
+        client = AsyncMock()
+        out_file = self.dir_path / "both_vouchers.txt"
+        calls = []
+
+        async def mock_claim(client, account_identity, voucher_link, *args, **kwargs):
+            calls.append((account_identity, voucher_claim.voucher_name_from_link(voucher_link)))
+            return "BERHASIL", "Voucher berhasil diklaim", "OK"
+
+        with patch("voucher_claim.claim_voucher_for_account", side_effect=mock_claim):
+            with patch("voucher_claim.load_voucher_links",
+                       return_value=list(voucher_claim.DEFAULT_VOUCHER_LINKS)):
+                with patch("asyncio.sleep", new_callable=AsyncMock):
+                    with patch("sys.stdout", new=StringIO()):
+                        stats = await voucher_claim.run_voucher_claim_mode(
+                            client=client, accounts=["a", "b"], output_file=out_file, step_delay=0)
+
+        self.assertEqual(calls, [("a", "NEWFOODIES"), ("a", "ONGKIRGRATIS"),
+                                 ("b", "NEWFOODIES"), ("b", "ONGKIRGRATIS")])
+        self.assertEqual(stats["success"], 4)
+        self.assertEqual(stats["total"], 4)
+        self.assertIn("a | ONGKIRGRATIS", out_file.read_text(encoding="utf-8"))
 
     # 8. Format Tampilan Kotak Terminal Konsisten
     def test_render_claim_summary_box(self):

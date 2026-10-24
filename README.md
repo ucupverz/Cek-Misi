@@ -15,6 +15,24 @@ Tools otomatisasi terpadu berbasis **Python & Telethon** untuk HP Android (Termu
 
 ---
 
+## 🖥️ Aplikasi Desktop (GUI) & EXE
+
+Cara paling mudah: pakai aplikasi desktop.
+
+```bash
+pip install -r requirements.txt
+python gui.py
+```
+
+Menu: Beranda, Klaim Voucher, Cek Misi QRIS, Cek Voucher Food, Cek Keduanya, Pengaturan (API ID/HASH, reset login, file hasil).
+Login Telegram (nomor HP, kode, 2FA) muncul sebagai kotak dialog.
+
+**Bikin `.exe` (Windows):** klik dua kali `build_exe.bat` -> hasil `dist\HambaKu.exe`.
+Atau lewat GitHub: tab Actions -> *Build EXE* -> Run workflow -> unduh artifact `HambaKu-exe`.
+File sesi & hasil disimpan di folder yang sama dengan `HambaKu.exe`.
+
+---
+
 ## 📑 Daftar Isi
 1. [📦 Panduan Menyiapkan Daftar Akun (Mode Bulk / Massal)](#-panduan-menyiapkan-daftar-akun-mode-bulk--massal)
 2. [📱 Syarat & Persiapan Awal](#-syarat--persiapan-awal)
