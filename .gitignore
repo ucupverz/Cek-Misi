@@ -47,3 +47,8 @@ ENV/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Build EXE
+build/
+dist/
+*.spec
