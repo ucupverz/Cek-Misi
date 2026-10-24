@@ -117,7 +117,7 @@ FEATURES = {
     "register": {
         "nav": "Daftar Akun Fresh",
         "title": "Daftar Akun Fresh ShopeeFood",
-        "desc": "Daftarkan akun ShopeeFood baru otomatis lewat @shp_tools_bot: nomor otomatis, OTP, fingerprint, lalu simpan hasilnya. Gagal? Diulang otomatis.",
+        "desc": "Daftarkan akun ShopeeFood baru otomatis lewat @shp_tools_bot: nomor otomatis, OTP (diurus bot), pilih fingerprint, lalu simpan hasilnya. Gagal? Diulang otomatis dari /account.",
         "delay": 6.0,
         "hint": "",
     },
@@ -652,7 +652,6 @@ class TaskPage(ctk.CTkFrame):
 # Halaman: Daftar Akun Fresh
 # =====================================================================
 class RegisterPage(ctk.CTkFrame):
-    OTP_CHOICES = {"Bot Telegram": "bot", "SMS forwarder": "sms", "Ketik manual": "input"}
     PROG_RE = re.compile(r"^\[[█░]+\]\s*([\d.]+)%\s*\((\d+)/(\d+)\)")
 
     def __init__(self, master, app):
@@ -687,16 +686,18 @@ class RegisterPage(ctk.CTkFrame):
         self.target_entry.insert(0, "10")
         self.target_entry.pack(anchor="w", padx=18, pady=(8, 0))
 
-        label(left, "2. Sumber OTP", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
-        self.otp_hint = label(left, "", 11, color=C_MUTED, wraplength=300, justify="left")
-        self.otp_hint.pack(anchor="w", padx=18)
-        self.otp_seg = ctk.CTkSegmentedButton(
-            left, values=list(self.OTP_CHOICES), selected_color=C_ACCENT,
+        label(left, "2. Fingerprint", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
+        self.fp_hint = label(left, "", 11, color=C_MUTED, wraplength=300, justify="left")
+        self.fp_hint.pack(anchor="w", padx=18)
+        self.fp_seg = ctk.CTkSegmentedButton(
+            left, values=["Custom", "Otomatis"], selected_color=C_ACCENT,
             selected_hover_color=C_ACCENT_HOVER, unselected_color=C_CARD_ALT,
-            unselected_hover_color=C_BORDER, fg_color=C_CARD_ALT, command=lambda _v: self._otp_hint())
-        self.otp_seg.set("Bot Telegram")
-        self.otp_seg.pack(anchor="w", padx=18, pady=(8, 0))
-        self._otp_hint()
+            unselected_hover_color=C_BORDER, fg_color=C_CARD_ALT, command=lambda _v: self._fp_hint())
+        self.fp_seg.set("Custom")
+        self.fp_seg.pack(anchor="w", padx=18, pady=(8, 0))
+        self._fp_hint()
+        label(left, "OTP diurus otomatis oleh bot, Anda tidak perlu mengisi apa pun.", 11,
+              color=C_MUTED, wraplength=300, justify="left").pack(anchor="w", padx=18, pady=(14, 0))
 
         label(left, "3. Jeda antar akun", 14, "bold").pack(anchor="w", padx=18, pady=(18, 0))
         drow = ctk.CTkFrame(left, fg_color="transparent")
@@ -767,7 +768,6 @@ class RegisterPage(ctk.CTkFrame):
         lh.pack(fill="x", padx=16, pady=(12, 0))
         label(lh, "Log", 14, "bold").pack(side="left")
         ghost_button(lh, "Bersihkan", self.clear_log, width=80, height=26).pack(side="right")
-        ghost_button(lh, "Edit fingerprint", self.edit_fp, width=110, height=26).pack(side="right", padx=6)
         self.log = ctk.CTkTextbox(lc, fg_color=C_BG, border_width=0, corner_radius=10,
                                   font=ctk.CTkFont(family="Consolas", size=12), text_color=C_TEXT,
                                   wrap="word", state="disabled")
@@ -780,17 +780,11 @@ class RegisterPage(ctk.CTkFrame):
     def _delay_label(self):
         self.delay_lbl.configure(text=f"{self.delay_var.get():.0f} detik")
 
-    def _otp_hint(self):
-        src = self.OTP_CHOICES[self.otp_seg.get()]
-        self.otp_hint.configure(text={
-            "bot": "OTP dibaca otomatis dari pesan bot. Paling umum.",
-            "sms": "OTP dibaca dari file otp_inbox.txt (format: nomor|otp).",
-            "input": "Kotak input muncul setiap OTP dibutuhkan.",
-        }[src])
-
-    def edit_fp(self):
-        daf.load_fingerprints()
-        open_path(daf.DEFAULT_FINGERPRINT_FILE.resolve())
+    def _fp_hint(self):
+        self.fp_hint.configure(text={
+            "Custom": "Tombol 'Fingerprint Custom' di bot diklik otomatis (fingerprint dari database bot).",
+            "Otomatis": "Tombol 'Fingerprint Otomatis' di bot diklik otomatis.",
+        }[self.fp_seg.get()])
 
     def clear_log(self):
         self.log.configure(state="normal")
@@ -875,7 +869,7 @@ class RegisterPage(ctk.CTkFrame):
             messagebox.showwarning(APP_NAME, "Isi jumlah akun dengan angka minimal 1.")
             return
         target = int(raw)
-        otp_src = self.OTP_CHOICES[self.otp_seg.get()]
+        use_custom = self.fp_seg.get() == "Custom"
         delay = float(self.delay_var.get())
 
         self.target, self.ok, self.fail, self.accounts = target, 0, 0, []
@@ -885,28 +879,15 @@ class RegisterPage(ctk.CTkFrame):
         self._refresh_stats()
         self.state_lbl.configure(text="Menghubungkan ke Telegram ...", text_color=C_INFO)
 
-        def ask_otp():
-            try:
-                prompt = ("Masukkan kode OTP yang Anda terima" if otp_src == "input"
-                          else "OTP otomatis tidak masuk. Ketik kode OTP manual (Batal untuk lewati)")
-                return input(prompt) or None
-            except EOFError:
-                return None
-
         async def job():
             sessions = shopee_core.get_available_telegram_sessions()
             client = shopee_core.create_client(sessions[0] if sessions else None)
             try:
                 await shopee_core.start_client(client)
                 print("✅ Terhubung ke Telegram. Mulai mendaftarkan akun...")
-                loop = asyncio.get_running_loop()
-
-                async def manual(_phone):
-                    return await loop.run_in_executor(None, ask_otp)
-
                 await daf.run_register_fresh_batch(
-                    client=client, total_target=target, otp_source=otp_src, step_delay=delay,
-                    manual_otp_callback=manual, on_event=lambda e: LOG_QUEUE.put(("event", e)))
+                    client=client, total_target=target, use_custom_fp=use_custom, step_delay=delay,
+                    on_event=lambda e: LOG_QUEUE.put(("event", e)))
             finally:
                 try:
                     await client.disconnect()

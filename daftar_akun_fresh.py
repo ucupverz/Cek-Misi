@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """Modul Daftar Akun Fresh ShopeeFood via @shp_tools_bot (Telegram).
 
-Flow:
-1. /account
-2. Klik 'Daftar Akun'
-3. Klik 'Nomor Otomatis' (inline button dari bot)
-4. Tunggu bot ngasih respon (OTP / sukses / error)
-5. Jika bot minta OTP -> kirim OTP (bisa otomatis dari chat / sms inbox)
-6. Kirim fingerprint custom
-7. Tangkap hasil akhir (cookie, userid, dll) atau error
-8. Jika error -> ulang dari langkah 1 (sampai dapat / batas retry)
+Flow (mengikuti respons bot / stateful):
+1. /account -> klik 'Daftar Akun' -> klik 'Nomor Otomatis'
+2. Bot sendiri yang mengurus OTP ("Menunggu OTP masuk ... kirim ulang #N").
+   Kita cukup menunggu sampai bot memberi salah satu hasil:
+   a. "OTP tak masuk ... Coba lagi /account" / error lain -> gagal, ulang dari /account
+   b. "OTP benar" + tombol "Fingerprint Otomatis" / "Fingerprint Custom"
+      -> klik tombol sesuai pilihan (TIDAK ada string fingerprint yang dikirim ke chat)
+3. Tunggu hasil akhir akun (username / password / UserID / cookie) lalu simpan.
 """
 
 import asyncio
 from datetime import datetime
-import json
 from pathlib import Path
 import re
 from typing import List, Optional, Tuple, Union
@@ -29,7 +27,6 @@ try:
 except ImportError:
     pass
 
-# Warna terminal
 CYAN = "\033[96m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -42,106 +39,42 @@ DEFAULT_BOT = "@shp_tools_bot"
 DEFAULT_OUTPUT_FILE = Path("akun_fresh.txt")
 DEFAULT_COOKIE_FILE = Path("akun_fresh_cookies.txt")
 DEFAULT_FAILED_FILE = Path("akun_fresh_failed.txt")
-DEFAULT_FINGERPRINT_FILE = Path("fingerprints.json")
-DEFAULT_OTP_INBOX = Path("otp_inbox.txt")
 
-# Fallback fingerprint bawaan BABA
-DEFAULT_FINGERPRINTS = [
-    "uCRo2kEaXUghafMobGRK4A==|0oRwIeqwhjegupUe9pM+qaTtNUbf2vllEdNndC3tfs2AMDmjjb4u1YL4bVd1MqenPV4D3TlPYFCC3HjPPFsSFQ==|Jyy1VWPv6BrsApQu|08|2",
-    "tyIINVG/X75cMujgMc/h4A==|d+ciza+Ap8WqPkn7GszY1Vh1V3QvjvEjXYe4Y6uWLujm8nWi0Wh6m/8Xzc10LnifIdoZXFidYDSrFNl5DzRW/18T+Q==|UUMSl5QlkVsH3/9N|08|2",
-]
+# Batas aman menunggu OTP + hasil dari bot (bot sendiri menunggu ~61 dtk x beberapa kirim ulang)
+DEFAULT_WAIT_TIMEOUT = 420.0
+
 
 # =====================================================================
-# KONFIGURASI FINGERPRINT & FILE
+# HELPER BOT
 # =====================================================================
 
-def load_fingerprints() -> List[str]:
-    if DEFAULT_FINGERPRINT_FILE.is_file():
-        try:
-            data = json.loads(DEFAULT_FINGERPRINT_FILE.read_text(encoding="utf-8"))
-            fps = [str(x).strip() for x in data.get("fingerprints", []) if str(x).strip()]
-            if fps:
-                return fps
-        except Exception:
-            pass
-    try:
-        DEFAULT_FINGERPRINT_FILE.write_text(
-            json.dumps({"fingerprints": DEFAULT_FINGERPRINTS}, indent=2), encoding="utf-8")
-    except Exception:
-        pass
-    return list(DEFAULT_FINGERPRINTS)
+def _bot_messages_since(messages, base_id: int):
+    """Pesan dari bot (bukan kita) yang lebih baru dari base_id, urut naik."""
+    return sorted((m for m in messages if m.id > base_id and not getattr(m, "out", False)), key=lambda m: m.id)
 
 
-def save_fingerprints(fingerprints: List[str]) -> bool:
-    uniq = list(dict.fromkeys(str(f).strip() for f in fingerprints if str(f).strip()))
-    try:
-        DEFAULT_FINGERPRINT_FILE.write_text(json.dumps({"fingerprints": uniq}, indent=2), encoding="utf-8")
-        return True
-    except Exception:
-        return False
+def _iter_buttons(msg):
+    for r, row in enumerate(getattr(msg, "buttons", None) or []):
+        for c, btn in enumerate(row):
+            yield r, c, btn
 
 
-def pick_fingerprint(index: int = 0) -> str:
-    fps = load_fingerprints()
-    return fps[index % len(fps)] if fps else DEFAULT_FINGERPRINTS[0]
+async def wait_button(client, target_bot: str, base_id: int, match_fn, timeout: float = 20.0, poll: float = 0.8):
+    """Tunggu tombol inline yang labelnya cocok pada pesan bot setelah base_id.
 
-# =====================================================================
-# HELPER OTP & BOT
-# =====================================================================
-
-async def wait_otp_from_inbox(phone: str, timeout: float = 90.0, poll: float = 1.5) -> Optional[str]:
-    phone_clean = re.sub(r"\D", "", phone)
+    Dibaca ulang tiap polling, jadi pesan yang di-EDIT bot (tombol berganti)
+    tetap terdeteksi.
+    """
     deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        if DEFAULT_OTP_INBOX.is_file():
-            try:
-                lines = DEFAULT_OTP_INBOX.read_text(encoding="utf-8", errors="ignore").splitlines()
-                for line in reversed(lines):  # OTP terbaru dulu
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-                    parts = re.split(r"[|,;\t]+", line)
-                    if len(parts) < 2:
-                        continue
-                    num = re.sub(r"\D", "", parts[0])
-                    otp = re.sub(r"\D", "", parts[1])
-                    if otp and (not phone_clean or not num or num == phone_clean or phone_clean.endswith(num[-8:])):
-                        return otp
-            except Exception:
-                pass
+    while True:
+        messages = await client.get_messages(target_bot, limit=15)
+        for msg in reversed(_bot_messages_since(messages, base_id)):  # terbaru dulu
+            for r, c, btn in _iter_buttons(msg):
+                if match_fn((getattr(btn, "text", "") or "").casefold()):
+                    return msg, btn, r, c
+        if asyncio.get_running_loop().time() >= deadline:
+            return None, None, -1, -1
         await asyncio.sleep(poll)
-    return None
-
-
-async def wait_otp_from_bot(client, target_bot: str, after_id: int, timeout: float = 90.0, poll: float = 1.0) -> Optional[str]:
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        messages = await client.get_messages(target_bot, limit=10)
-        for msg in sorted((m for m in messages if m.id > after_id and not getattr(m, "out", False)), key=lambda m: m.id):
-            text = (getattr(msg, "text", "") or "").strip()
-            if not text:
-                continue
-            low = text.casefold()
-            if "otp" in low or "kode" in low or "verifikasi" in low or "masukkan" in low:
-                m = re.search(r"\b(\d{4,6})\b", text)
-                if m:
-                    return m.group(1)
-        await asyncio.sleep(poll)
-    return None
-
-
-async def wait_button(client, target_bot: str, after_id: int, match_fn, timeout: float = 20.0, poll: float = 0.8):
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        messages = await client.get_messages(target_bot, limit=10)
-        for msg in sorted((m for m in messages if m.id > after_id and not getattr(m, "out", False) and getattr(m, "buttons", None)), key=lambda m: m.id):
-            for r, row in enumerate(msg.buttons):
-                for c, btn in enumerate(row):
-                    label = (getattr(btn, "text", "") or "").casefold()
-                    if match_fn(label):
-                        return msg, btn, r, c
-        await asyncio.sleep(poll)
-    return None, None, -1, -1
 
 
 async def click(btn, msg, r: int, c: int):
@@ -152,8 +85,9 @@ async def click(btn, msg, r: int, c: int):
     else:
         raise RuntimeError("tombol tidak bisa diklik")
 
+
 # =====================================================================
-# PARSER & PENYIMPANAN HASIL
+# PARSER HASIL AKUN
 # =====================================================================
 
 def parse_account_result(text: str) -> dict:
@@ -195,18 +129,28 @@ def parse_account_result(text: str) -> dict:
             out["success"] = True
 
     if not out["success"]:
-        err = ""
-        for line in text.splitlines():
-            s = line.strip()
-            if any(k in s.casefold() for k in ("gagal", "error", "tidak bisa", "ditolak", "limit", "banned", "tidak memenuhi", "captcha")):
-                err = s
-                break
-        out["error"] = err or "tidak ada penanda sukses"
+        out["error"] = _first_error_line(text) or "tidak ada penanda sukses"
     return out
 
 
+_ERROR_KEYS = ("gagal", "error", "tidak bisa", "ditolak", "limit", "banned", "tidak memenuhi",
+               "captcha", "provider", "otp tak masuk", "coba lagi", "timeout", "habis", "tidak tersedia")
+
+
+def _first_error_line(text: str) -> str:
+    for line in text.splitlines():
+        s = line.strip()
+        if s and any(k in s.casefold() for k in _ERROR_KEYS + ("❌",)):
+            return s
+    return ""
+
+
+# =====================================================================
+# PENYIMPANAN HASIL
+# =====================================================================
+
 def save_fresh_account(res: dict, output_file: Union[str, Path] = DEFAULT_OUTPUT_FILE,
-                       cookie_file: Union[str, Path] = DEFAULT_COOKIE_FILE):
+                       cookie_file: Union[str, Path] = DEFAULT_COOKIE_FILE) -> bool:
     if not res.get("success"):
         return False
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -226,156 +170,187 @@ def save_fresh_account(res: dict, output_file: Union[str, Path] = DEFAULT_OUTPUT
     return True
 
 
-def save_failed_account(phone: str, reason: str, output_file: Union[str, Path] = DEFAULT_FAILED_FILE):
+def save_failed_account(reason: str, output_file: Union[str, Path] = DEFAULT_FAILED_FILE):
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with Path(output_file).open("a", encoding="utf-8") as f:
-            f.write(f"[{now_str}] {phone if phone else 'OTOMATIS'} | {reason}\n")
+            f.write(f"[{now_str}] {reason}\n")
     except Exception:
         pass
+
+
+# =====================================================================
+# KLASIFIKASI PESAN BOT
+# =====================================================================
+
+def classify_bot_text(text: str) -> str:
+    """Kembalikan: 'success' | 'waiting' | 'otp_ok' | 'error' | 'other'."""
+    low = (text or "").casefold()
+    if not low.strip():
+        return "other"
+    if "berhasil didaftarkan" in low or (("username:" in low and "password:" in low)
+                                         or ("userid:" in low and "nomor:" in low)):
+        return "success"
+    if "menunggu otp" in low or "memproses" in low or "mohon tunggu" in low or "loading" in low:
+        return "waiting"
+    if "otp benar" in low:
+        return "otp_ok"
+    if "❌" in text or any(k in low for k in _ERROR_KEYS):
+        return "error"
+    return "other"
+
+
+def _is_fp_button(label: str) -> bool:
+    return "fingerprint" in label and ("custom" in label or "otomatis" in label)
+
 
 # =====================================================================
 # CORE FLOW: DAFTAR 1 AKUN
 # =====================================================================
 
 async def register_one_account(
-    client, target_bot: str = DEFAULT_BOT, otp_source: str = "bot",
-    otp_timeout: float = 90.0, manual_otp_callback=None, fp_index: int = 0,
+    client,
+    target_bot: str = DEFAULT_BOT,
+    use_custom_fp: bool = True,
+    wait_timeout: float = DEFAULT_WAIT_TIMEOUT,
     on_step=None,
+    poll: float = 1.5,
 ) -> Tuple[bool, str, dict]:
+    """Daftarkan 1 akun. Return (sukses, alasan, hasil_parse)."""
 
     def step(msg: str):
         if on_step:
             on_step(msg)
 
+    loop = asyncio.get_running_loop()
+
     # 1. /account
     step("Mengirim /account ...")
     try:
-        prev = await client.get_messages(target_bot, limit=1)
-        last_id = prev[0].id if prev else 0
         cmd = await client.send_message(target_bot, "/account")
-        last_id = max(last_id, cmd.id)
+        base_id = cmd.id
     except Exception as exc:
         return False, f"gagal kirim /account: {exc}", {}
-
     await asyncio.sleep(1.5)
 
     # 2. Klik 'Daftar Akun'
-    def match_register(label: str) -> bool:
-        return any(k in label for k in ("daftar akun", "register", "daftar baru", "buat akun"))
-
     step("Klik tombol 'Daftar Akun' ...")
-    msg, btn, r, c = await wait_button(client, target_bot, last_id, match_register, timeout=20.0)
+    msg, btn, r, c = await wait_button(
+        client, target_bot, base_id,
+        lambda l: any(k in l for k in ("daftar akun", "register", "daftar baru", "buat akun")),
+        timeout=25.0)
     if not btn:
         return False, "tombol 'Daftar Akun' tidak ditemukan", {}
     try:
         await click(btn, msg, r, c)
     except Exception as exc:
         return False, f"gagal klik Daftar Akun: {exc}", {}
-    last_id = max(last_id, msg.id)
     await asyncio.sleep(1.5)
 
     # 3. Klik 'Nomor Otomatis'
-    def match_auto_number(label: str) -> bool:
-        return any(k in label for k in ("nomor otomatis", "otomatis", "auto number"))
-
     step("Klik tombol 'Nomor Otomatis' ...")
-    msg, btn, r, c = await wait_button(client, target_bot, last_id, match_auto_number, timeout=20.0)
+    msg, btn, r, c = await wait_button(
+        client, target_bot, base_id,
+        lambda l: any(k in l for k in ("nomor otomatis", "auto number", "nomor auto")),
+        timeout=25.0)
     if not btn:
         return False, "tombol 'Nomor Otomatis' tidak ditemukan", {}
     try:
         await click(btn, msg, r, c)
     except Exception as exc:
         return False, f"gagal klik Nomor Otomatis: {exc}", {}
-    last_id = max(last_id, msg.id)
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(2.0)
 
-    # 4. Tunggu OTP
-    step(f"Menunggu OTP (sumber: {otp_source}, maks {int(otp_timeout)} dtk) ...")
-    otp = None
-    if otp_source == "bot":
-        otp = await wait_otp_from_bot(client, target_bot, last_id, timeout=otp_timeout)
-    elif otp_source == "sms":
-        otp = await wait_otp_from_inbox("", timeout=otp_timeout)
+    # 4. Ikuti state bot: tunggu OTP -> pilih fingerprint -> hasil akhir
+    step("Menunggu bot memproses OTP (bot kirim ulang sendiri, harap sabar) ...")
+    fp_wanted = "custom" if use_custom_fp else "otomatis"
+    fp_clicked_ids = set()
+    last_state = ""
+    deadline = loop.time() + wait_timeout
 
-    if not otp and manual_otp_callback is not None:
-        try:
-            otp = await manual_otp_callback("")
-        except Exception:
-            pass
+    while loop.time() < deadline:
+        messages = await client.get_messages(target_bot, limit=15)
+        bot_msgs = _bot_messages_since(messages, base_id)
 
-    if otp:
-        if not re.fullmatch(r"\d{4,6}", otp):
-            return False, f"format OTP aneh: {otp}", {}
-        step(f"OTP diterima ({otp}), mengirim ke bot ...")
-        try:
-            sent_otp = await client.send_message(target_bot, otp)
-            last_id = max(last_id, sent_otp.id)
-            await asyncio.sleep(2.0)
-        except Exception as exc:
-            return False, f"gagal kirim OTP: {exc}", {}
-
-    # 5. Kirim Fingerprint
-    step("Mengirim fingerprint ...")
-    fp = pick_fingerprint(fp_index)
-    try:
-        sent_fp = await client.send_message(target_bot, fp)
-        last_id = max(last_id, sent_fp.id)
-    except Exception as exc:
-        return False, f"gagal kirim fingerprint: {exc}", {}
-
-    # 6. Tunggu Hasil Akhir
-    step("Menunggu hasil akun dari bot ...")
-    deadline = asyncio.get_running_loop().time() + 60.0
-    final_text = ""
-    while asyncio.get_running_loop().time() < deadline:
-        messages = await client.get_messages(target_bot, limit=10)
-        for m in sorted((x for x in messages if x.id > sent_fp.id and not getattr(x, "out", False)), key=lambda x: x.id):
+        # 4a. Hasil akhir sukses (pesan mana pun)
+        for m in reversed(bot_msgs):
             txt = (getattr(m, "text", "") or "").strip()
-            if not txt:
+            if txt and classify_bot_text(txt) == "success":
+                parsed = parse_account_result(txt)
+                if parsed.get("success"):
+                    return True, "ok", parsed
+                return False, parsed.get("error") or "hasil tidak valid", parsed
+
+        # 4b. Tombol pilihan fingerprint (OTP sudah benar)
+        for m in reversed(bot_msgs):
+            if m.id in fp_clicked_ids:
                 continue
-            low = txt.casefold()
-            if any(k in low for k in ("memproses", "mohon tunggu", "loading")):
+            fp_btns = [(r2, c2, b) for r2, c2, b in _iter_buttons(m)
+                       if _is_fp_button((getattr(b, "text", "") or "").casefold())]
+            if not fp_btns:
                 continue
-            if any(k in low for k in (
-                "berhasil didaftarkan", "gagal", "error", "tidak bisa",
-                "ditolak", "captcha", "provider", "limit", "username:", "userid:",
-            )):
-                final_text = txt
-                break
-        if final_text:
+            pick = next((x for x in fp_btns if fp_wanted in (x[2].text or "").casefold()), None)
+            if pick is None:
+                return False, f"tombol Fingerprint {fp_wanted.title()} tidak ada di bot", {}
+            step(f"OTP benar. Klik '{pick[2].text}' ...")
+            try:
+                await click(pick[2], m, pick[0], pick[1])
+            except Exception as exc:
+                return False, f"gagal klik fingerprint: {exc}", {}
+            fp_clicked_ids.add(m.id)
+            last_state = "fp"
+            await asyncio.sleep(2.0)
             break
-        await asyncio.sleep(1.0)
+        else:
+            # 4c. Pesan bot terbaru menentukan state: error / menunggu
+            latest = next((m for m in reversed(bot_msgs) if (getattr(m, "text", "") or "").strip()), None)
+            if latest is not None:
+                txt = latest.text.strip()
+                state = classify_bot_text(txt)
+                if state == "error":
+                    return False, _first_error_line(txt) or txt.splitlines()[0], {}
+                if state == "waiting" and last_state != "wait":
+                    last_state = "wait"
+                    step("Bot menunggu OTP masuk ... (tunggu terus, jangan pindah command)")
+                elif state == "otp_ok" and last_state != "otp_ok":
+                    last_state = "otp_ok"
+                    step("OTP benar, menunggu pilihan fingerprint dari bot ...")
+                elif fp_clicked_ids and last_state == "fp":
+                    last_state = "fp_wait"
+                    step("Fingerprint dipilih, menunggu hasil akun ...")
+        await asyncio.sleep(poll)
 
-    if not final_text:
-        return False, "timeout hasil akhir", {}
+    if fp_clicked_ids:
+        return False, "timeout menunggu hasil akhir setelah fingerprint", {}
+    return False, "timeout menunggu OTP / respons bot", {}
 
-    parsed = parse_account_result(final_text)
-    if parsed.get("success"):
-        return True, "ok", parsed
-    return False, parsed.get("error", "gagal didaftarkan"), parsed
 
 # =====================================================================
 # BATCH RUNNER
 # =====================================================================
 
 async def run_register_fresh_batch(
-    client, total_target: int = 10, target_bot: str = DEFAULT_BOT,
-    otp_source: str = "bot", otp_timeout: float = 90.0, step_delay: float = 5.0,
-    max_retry_per_target: int = 99,
+    client,
+    total_target: int = 10,
+    target_bot: str = DEFAULT_BOT,
+    use_custom_fp: bool = True,
+    step_delay: float = 5.0,
+    retry_delay: float = 3.0,
     output_file: Union[str, Path] = DEFAULT_OUTPUT_FILE,
     cookie_file: Union[str, Path] = DEFAULT_COOKIE_FILE,
-    manual_otp_callback=None,
     on_event=None,
 ) -> dict:
-    """on_event(dict) opsional: type = attempt | step | success | fail | done."""
+    """Ulangi flow dari /account sampai jumlah akun target tercapai.
+
+    Berhenti lewat Ctrl+C / membatalkan task (tombol Berhenti di aplikasi).
+    on_event(dict): type = attempt | step | attempt_fail | success | done
+    """
     def emit(**kw):
         if on_event:
             try:
                 on_event(kw)
             except Exception:
                 pass
-
 
     if total_target <= 0:
         print(f"{RED}❌ Target harus lebih dari 0.{RESET}")
@@ -386,84 +361,64 @@ async def run_register_fresh_batch(
     print(f"{CYAN}===================================================={RESET}")
     print(f"🤖 Bot         : {BOLD}{target_bot}{RESET}")
     print(f"🎯 Target akun : {BOLD}{total_target}{RESET}")
-    print(f"🔑 Sumber OTP  : {BOLD}{otp_source}{RESET}")
-    print(f"📂 Hasil akun  : {output_file}")
-    print(f"🍪 Hasil cookie: {cookie_file}")
-    print(f"{CYAN}----------------------------------------------------{RESET}")
-    print(f"{YELLOW}Tekan Ctrl+C kapan saja untuk berhenti.{RESET}\n")
+    print(f"🔑 Fingerprint : {BOLD}{'Custom' if use_custom_fp else 'Otomatis'}{RESET}")
+    print(f"📂 Hasil       : {output_file}")
+    print(f"{CYAN}----------------------------------------------------{RESET}\n")
 
     success_count = 0
     fail_count = 0
+    attempts = 0
     results = []
-    stop_all = False
-    global_idx = 0
 
     try:
-        while success_count < total_target and not stop_all:
-            global_idx += 1
-            emit(type="attempt", index=global_idx, success=success_count, fail=fail_count, target=total_target)
+        while success_count < total_target:
+            attempts += 1
             bar = shopee_core.render_progress_bar(success_count, total_target)
-            print(f"{CYAN}{bar}{RESET} Akun {success_count + 1}/{total_target} "
-                  f"(butuh {total_target - success_count} lagi)")
+            print(f"{CYAN}{bar}{RESET} Percobaan ke-{attempts} (butuh {total_target - success_count} lagi)")
+            emit(type="attempt", index=attempts, success=success_count, fail=fail_count, target=total_target)
+            try:
+                ok, reason, parsed = await register_one_account(
+                    client, target_bot=target_bot, use_custom_fp=use_custom_fp,
+                    on_step=lambda m: (print(f"  ├─ {m}"), emit(type="step", text=m)))
+            except FloodWaitError as exc:
+                print(f"  └─ {YELLOW}⚠️ Telegram FloodWait {exc.seconds} dtk, istirahat dulu ...{RESET}")
+                emit(type="step", text=f"FloodWait {exc.seconds} dtk, menunggu ...")
+                await asyncio.sleep(exc.seconds + 3)
+                continue
+            except Exception as exc:
+                ok, reason, parsed = False, f"exception: {exc}", {}
 
-            attempt = 0
-            ok = False
-            last_reason = ""
-
-            while attempt < max_retry_per_target and not ok:
-                attempt += 1
-                if attempt > 1:
-                    print(f"  ↻ Ulang dari awal (percobaan #{attempt}) ...")
-                    await asyncio.sleep(3)
-                try:
-                    ok, reason, parsed = await register_one_account(
-                        client=client, target_bot=target_bot, otp_source=otp_source,
-                        otp_timeout=otp_timeout, manual_otp_callback=manual_otp_callback,
-                        fp_index=global_idx, on_step=lambda m: (print(f"  ├─ {m}"), emit(type="step", text=m)),
-                    )
-                    last_reason = reason
-                    if ok:
-                        save_fresh_account(parsed, output_file, cookie_file)
-                        print(f"  └─ {GREEN}{BOLD}✅ Berhasil: {parsed.get('username')} | UID {parsed.get('user_id')}{RESET}")
-                        success_count += 1
-                        emit(type="success", result=parsed, success=success_count, fail=fail_count, target=total_target)
-                        results.append({"attempt": global_idx, "success": True, "result": parsed})
-                    else:
-                        print(f"  └─ {YELLOW}⚠️ Gagal: {reason}{RESET}")
-                        emit(type="attempt_fail", reason=reason)
-                except FloodWaitError as exc:
-                    print(f"  └─ {RED}⚠️ Telegram FloodWait {exc.seconds} dtk. Proses dihentikan.{RESET}")
-                    last_reason = f"FloodWait {exc.seconds}s"
-                    stop_all = True
-                    break
-                except Exception as exc:
-                    last_reason = f"exception: {exc}"
-                    print(f"  └─ {RED}❌ {last_reason}{RESET}")
-
-            if not ok:
-                save_failed_account("OTOMATIS", last_reason or "gagal semua retry")
+            if ok:
+                save_fresh_account(parsed, output_file, cookie_file)
+                success_count += 1
+                results.append({"attempt": attempts, "success": True, "result": parsed})
+                print(f"  └─ {GREEN}{BOLD}✅ Akun berhasil: {parsed.get('username')} | UID {parsed.get('user_id')}{RESET}\n")
+                emit(type="success", result=parsed, success=success_count, fail=fail_count, target=total_target)
+                if success_count < total_target:
+                    await asyncio.sleep(step_delay)
+            else:
                 fail_count += 1
-                emit(type="fail", reason=last_reason, success=success_count, fail=fail_count, target=total_target)
-                results.append({"attempt": global_idx, "success": False, "reason": last_reason})
-
-            print()
-            if not stop_all and success_count < total_target:
-                await asyncio.sleep(step_delay)
+                save_failed_account(reason)
+                results.append({"attempt": attempts, "success": False, "reason": reason})
+                print(f"  └─ {YELLOW}⚠️ Gagal: {reason}{RESET}")
+                print(f"  ↻ Ulang dari /account ...\n")
+                emit(type="attempt_fail", reason=reason)
+                await asyncio.sleep(retry_delay)
     except (KeyboardInterrupt, asyncio.CancelledError):
         print(f"\n{YELLOW}Dihentikan oleh pengguna.{RESET}")
 
     print(f"{CYAN}{BOLD}==================== RINGKASAN ===================={RESET}")
     print(f"🎯 Target akun     : {total_target}")
-    print(f"🔄 Total percobaan : {global_idx}")
+    print(f"🔄 Total percobaan : {attempts}")
     print(f"{GREEN}✅ Berhasil         : {success_count}{RESET}")
-    print(f"{RED}❌ Gagal            : {fail_count}{RESET}")
-    print(f"📂 File hasil       : {output_file} & {cookie_file}\n")
-
-    emit(type="done", success=success_count, fail=fail_count, target=total_target, attempts=global_idx)
+    print(f"{RED}❌ Percobaan gagal  : {fail_count}{RESET}")
+    print(f"📂 File hasil       : {output_file}\n")
+    emit(type="done", success=success_count, fail=fail_count, target=total_target, attempts=attempts)
     return {"total": total_target, "success": success_count, "fail": fail_count, "results": results}
 
+
 # =====================================================================
-# CLI / MENU
+# MENU KONSOL
 # =====================================================================
 
 def _ask(prompt: str, default: str = "") -> str:
@@ -475,50 +430,22 @@ async def interactive_register_menu():
     print(f"\n{CYAN}{BOLD}===================================================={RESET}")
     print(f"📝 {BOLD}DAFTAR AKUN FRESH ({DEFAULT_BOT}){RESET}")
     print(f"{CYAN}===================================================={RESET}")
-    print("Otomatis: /account > Daftar Akun > Nomor Otomatis > OTP > fingerprint.")
-    print("Jika gagal, proses diulang otomatis dari awal sampai target tercapai.")
-
-    print(f"\n{CYAN}{BOLD}LANGKAH 1/3 - Jumlah akun{RESET}")
-    target_str = _ask("Mau daftar berapa akun fresh?", "10")
-    total_target = int(target_str) if target_str.isdigit() and int(target_str) > 0 else 10
-
-    print(f"\n{CYAN}{BOLD}LANGKAH 2/3 - Cara mengambil OTP{RESET}")
-    print("  [1] Dari pesan bot Telegram (paling umum)")
-    print("  [2] Dari SMS forwarder (file otp_inbox.txt, format: nomor|otp)")
-    print("  [3] Ketik manual setiap OTP")
-    otp_src = {"1": "bot", "2": "sms", "3": "input", "bot": "bot", "sms": "sms", "input": "input"}.get(
-        _ask("Pilih sumber OTP", "1").casefold(), "bot")
-
-    print(f"\n{CYAN}{BOLD}LANGKAH 3/3 - Pengaturan{RESET}")
+    print("Otomatis: /account > Daftar Akun > Nomor Otomatis > (bot urus OTP) > pilih fingerprint.")
+    print("Jika bot gagal, proses diulang dari /account sampai target tercapai. Ctrl+C untuk berhenti.\n")
+    raw = _ask("Mau daftar berapa akun?", "10")
+    total = int(raw) if raw.isdigit() and int(raw) > 0 else 10
+    print("  [1] Fingerprint Custom\n  [2] Fingerprint Otomatis")
+    use_custom = _ask("Pilih fingerprint", "1") != "2"
     delay = 6.0
-    raw_delay = _ask("Jeda antar akun (detik)", "6")
     try:
-        delay = max(0.0, float(raw_delay))
+        delay = max(0.0, float(_ask("Jeda antar akun (detik)", "6")))
     except ValueError:
-        print(f"{YELLOW}Bukan angka, pakai 6 detik.{RESET}")
-
-    print(f"\n{CYAN}---------------- RINGKASAN PENGATURAN ----------------{RESET}")
-    print(f" Target akun : {total_target}")
-    print(f" Sumber OTP  : {otp_src}")
-    print(f" Jeda        : {delay:g} dtk")
-    print(f" Fingerprint : {len(load_fingerprints())} tersimpan ({DEFAULT_FINGERPRINT_FILE})")
-    print(f"{CYAN}------------------------------------------------------{RESET}")
-    if _ask("Mulai sekarang? (Y/n)", "y").casefold() not in ("y", "ya", "yes"):
-        print(f"{YELLOW}Dibatalkan.{RESET}")
-        return
-
-    async def _manual(_phone: str):
-        label = "Masukkan OTP" if otp_src == "input" else "OTP otomatis tidak masuk. Ketik manual (Enter = lewati)"
-        ans = await asyncio.to_thread(input, f"{YELLOW}{label}: {RESET}")
-        return ans.strip() or None
+        pass
 
     client = shopee_core.create_client()
     try:
         await shopee_core.start_client(client)
-        await run_register_fresh_batch(
-            client=client, total_target=total_target, otp_source=otp_src,
-            step_delay=delay, manual_otp_callback=_manual,
-        )
+        await run_register_fresh_batch(client, total_target=total, use_custom_fp=use_custom, step_delay=delay)
     finally:
         try:
             await client.disconnect()
@@ -531,5 +458,3 @@ if __name__ == "__main__":
         asyncio.run(interactive_register_menu())
     except (KeyboardInterrupt, EOFError):
         print("\nDihentikan.")
-    except Exception as exc:
-        print(f"\n❌ Error: {exc}")
