@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shopee Tools - Aplikasi Desktop (GUI).
+"""Hamba Ku - Aplikasi Desktop (GUI).
 
 Jalankan dari source:   python gui.py
 Bangun jadi .exe:       lihat build_exe.bat / README.md
@@ -66,7 +66,7 @@ import cek_misi_termux  # noqa: E402
 import shopee_core  # noqa: E402
 import voucher_claim  # noqa: E402
 
-APP_NAME = "Shopee Tools"
+APP_NAME = "Hamba Ku"
 APP_VERSION = "2.0"
 
 # Palet warna
@@ -233,8 +233,8 @@ class HomePage(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color="transparent")
         self.app = app
-        label(self, "Selamat datang", 26, "bold").pack(anchor="w")
-        label(self, "Pilih fitur yang ingin dijalankan. Semua proses berjalan otomatis lewat Telegram.",
+        label(self, "Selamat datang wahai hamba ku", 26, "bold").pack(anchor="w")
+        label(self, "Silakan sembah saya. Pilih fitur yang ingin dijalankan, semua proses berjalan otomatis lewat Telegram.",
               13, color=C_MUTED).pack(anchor="w", pady=(2, 18))
 
         self.status = card(self)
@@ -798,7 +798,7 @@ class App(ctk.CTk):
         brand = ctk.CTkFrame(sb, fg_color="transparent")
         brand.grid(row=0, column=0, sticky="ew", padx=20, pady=(26, 22))
         label(brand, APP_NAME, 20, "bold").pack(anchor="w")
-        label(brand, "Otomasi Shopee via Telegram", 11, color=C_MUTED).pack(anchor="w")
+        label(brand, "Sembah aku, hamba otomasimu", 11, color=C_MUTED).pack(anchor="w")
 
         self.nav = {}
         items = [("home", "Beranda")] + [(k, f["nav"]) for k, f in FEATURES.items()] + [("settings", "Pengaturan")]

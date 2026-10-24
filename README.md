@@ -27,9 +27,9 @@ python gui.py
 Menu: Beranda, Klaim Voucher, Cek Misi QRIS, Cek Voucher Food, Cek Keduanya, Pengaturan (API ID/HASH, reset login, file hasil).
 Login Telegram (nomor HP, kode, 2FA) muncul sebagai kotak dialog.
 
-**Bikin `.exe` (Windows):** klik dua kali `build_exe.bat` -> hasil `dist\ShopeeTools.exe`.
-Atau lewat GitHub: tab Actions -> *Build EXE* -> Run workflow -> unduh artifact `ShopeeTools-exe`.
-File sesi & hasil disimpan di folder yang sama dengan `ShopeeTools.exe`.
+**Bikin `.exe` (Windows):** klik dua kali `build_exe.bat` -> hasil `dist\HambaKu.exe`.
+Atau lewat GitHub: tab Actions -> *Build EXE* -> Run workflow -> unduh artifact `HambaKu-exe`.
+File sesi & hasil disimpan di folder yang sama dengan `HambaKu.exe`.
 
 ---
 
